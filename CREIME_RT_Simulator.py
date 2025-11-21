@@ -19,7 +19,7 @@ import json
 import sys
 import uuid
 from obspy import read, Stream, Trace, UTCDateTime
-from obspy.core.stats import Stats
+from obspy.core import Stats
 
 # ===== CONFIGURACIÓN GPU SEGURA PARA JETSON ORIN NANO =====
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
