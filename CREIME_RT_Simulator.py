@@ -131,7 +131,7 @@ class RealTimeVisualizer:
             self.fig, self.axes = plt.subplots(3, 1, figsize=(16, 10), dpi=120)
             self.ax1, self.ax2, self.ax3 = self.axes
             
-            self.fig.suptitle('CREIME_RT SIMULATOR - MiniSEED Playback', 
+            self.fig.suptitle('CREIME_RT SIMULATOR - Datos Procesados (Filtrado + Z-Score)', 
                              fontsize=16, fontweight='bold')
             
             self.line_enz, = self.ax1.plot([], [], color=COLOR_TEAL, linewidth=1.0, label='ENZ')
@@ -145,7 +145,7 @@ class RealTimeVisualizer:
             ]
             
             for ax, title, color in components_config:
-                ax.set_ylabel('Aceleración (Gals)', fontsize=12)
+                ax.set_ylabel('Amplitud Normalizada (Z-Score)', fontsize=12)
                 ax.set_title(title, fontsize=14, fontweight='bold')
                 ax.grid(True, alpha=0.3)
                 ax.axhline(y=0, color='k', linestyle='-', alpha=0.3)
@@ -768,7 +768,7 @@ class MiniSeedSimulator:
         
         # Obtener longitud mínima
         total_samples = min(len(tr.data) for tr in self.stream_data.values())
-        samples_per_packet = 50  # 50 muestras por paquete (0.5 segundos) - más eficiente
+        samples_per_packet = 10  # 10 muestras por paquete (0.1 segundos) - precisión original
         
         sample_index = 0
         packet_interval = (samples_per_packet / self.sampling_rate) / self.playback_speed
@@ -785,35 +785,33 @@ class MiniSeedSimulator:
                         tr = self.stream_data[component]
                         packet_data = tr.data[sample_index:sample_index + samples_per_packet]
                         
-                        # Aplicar preprocesamiento según documentación CREIME_RT
-                        # 1. Filtrado [1.0, 45.0] Hz
+                        # Procesamiento unificado: filtrado + normalización z-score
                         filtered_data = self.hybrid_filter.apply_filter(packet_data.tolist())
-                        
-                        # 2. Normalización z-score (por componente)
                         if len(filtered_data) > 1:
                             mean_val = np.mean(filtered_data)
                             std_val = np.std(filtered_data)
                             if std_val > 0:
-                                normalized_data = [(x - mean_val) / std_val for x in filtered_data]
+                                processed_data = [(x - mean_val) / std_val for x in filtered_data]
                             else:
-                                normalized_data = filtered_data
+                                processed_data = filtered_data
                         else:
-                            normalized_data = filtered_data
+                            processed_data = filtered_data
                         
-                        raw_data = normalized_data
+                        # Los mismos datos para visualización y CREIME_RT
+                        unified_data = processed_data
                         
                         # Diagnóstico para primeros paquetes
                         if self.packet_count < 3:
                             logging.info(f"Paquete {self.packet_count} {component}:")
-                            logging.info(f"  Original: {packet_data[:3]}... (rango: {np.min(packet_data):.6f} a {np.max(packet_data):.6f})")
-                            logging.info(f"  Procesado: {raw_data[:3]}... (rango: {np.min(raw_data):.6f} a {np.max(raw_data):.6f})")
+                            logging.info(f"  Original MiniSEED: {packet_data[:3]}... (rango: {np.min(packet_data):.6f} a {np.max(packet_data):.6f})")
+                            logging.info(f"  Procesado (Vis + CREIME_RT): {unified_data[:3]}... (rango: {np.min(unified_data):.6f} a {np.max(unified_data):.6f})")
                         
-                        # Añadir al buffer con timestamp secuencial
+                        # Usar los mismos datos procesados para buffer y visualizador
                         current_time = time.time()
-                        self.buffer.add_data(component, raw_data, current_time)
+                        self.buffer.add_data(component, unified_data, current_time)
                         
-                        # Actualizar visualizador con datos originales
-                        self.visualizer.update_data(component, raw_data, current_time)
+                        # Visualizador muestra exactamente lo que ve CREIME_RT
+                        self.visualizer.update_data(component, unified_data, current_time)
                 
                 self.packet_count += 1
                 sample_index += samples_per_packet
