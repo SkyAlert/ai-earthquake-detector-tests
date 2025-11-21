@@ -179,9 +179,9 @@ class RealTimeVisualizer:
                     continue
                 # Línea vertical para marcar ventana actual de procesamiento
                 window_line = ax.axvline(x=0, color=COLOR_GREEN, linestyle='-', 
-                                       linewidth=3, alpha=0.8, label='Ventana CREIME_RT (10s)')
+                                       linewidth=3, alpha=0.8, label='Ventana CREIME_RT (30s)')
                 # Área sombreada para ventana de procesamiento
-                window_fill = ax.axvspan(0, 10, color=COLOR_GREEN, alpha=0.15)
+                window_fill = ax.axvspan(0, 30, color=COLOR_GREEN, alpha=0.15)
                 
                 self.processing_window_markers.append({
                     'line': window_line,
@@ -318,8 +318,8 @@ class RealTimeVisualizer:
             return
             
         try:
-            # La ventana de procesamiento son los últimos 10 segundos
-            window_start = 10  # 10 segundos atrás
+            # La ventana de procesamiento son los últimos 30 segundos
+            window_start = 30  # 30 segundos atrás
             window_end = 0     # Tiempo actual
             
             for markers in self.processing_window_markers:
@@ -651,12 +651,12 @@ class MiniSeedSimulator:
         self.playback_speed = playback_speed  # 1.0 = tiempo real, 2.0 = 2x velocidad
         
         # Parámetros según documentación oficial CREIME_RT
-        self.window_size = 10 * sampling_rate  # 1000 muestras - 10 segundos
+        self.window_size = 30 * sampling_rate  # 3000 muestras - 30 SEGUNDOS (oficial)  # 1000 muestras - 10 segundos
         self.latency_target = 0.1 / playback_speed  # Ajustado por velocidad
-        self.detection_threshold = -2.0  # Aún más sensible para diagnóstico
+        self.detection_threshold = -0.5  # Umbral oficial documentación
         self.noise_baseline = -4.0
-        self.magnitude_threshold = 0.1  # Muy sensible para diagnóstico
-        self.consecutive_windows = 2  # Mínimo para detección rápida
+        self.magnitude_threshold = 0.1  # Sensible para diagnóstico
+        self.consecutive_windows = 5  # 5 ventanas según documentación
         
         # Componentes del sistema
         self.buffer = UltraFastBuffer(
