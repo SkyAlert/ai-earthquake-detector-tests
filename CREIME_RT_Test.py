@@ -185,11 +185,123 @@ def plot_data(slices, sampling_rate):
     plt.tight_layout()
     plt.show()
 
+def plot_creime_output(creime_outputs, sampling_rate):
+    """Visualiza la salida completa de CREIME_RT (vector de 6000 muestras)"""
+    print("\n" + "="*60)
+    print("VISUALIZACIÓN SALIDA CREIME_RT (6000 MUESTRAS)")
+    print("="*60)
+    
+    fig, axes = plt.subplots(2, 1, figsize=(16, 10))
+    fig.suptitle('Salida Temporal Completa de CREIME_RT\n(Vector de 6000 muestras)', fontsize=16, fontweight='bold')
+    
+    # Eje temporal para 6000 muestras (60 segundos a 100Hz)
+    time_axis = np.arange(6000) / 100  # CREIME_RT usa 100Hz internamente
+    
+    colors = ['blue', 'red']
+    slice_names = ['RUIDO', 'TERREMOTO']
+    
+    for i, (slice_name, output_data) in enumerate(creime_outputs.items()):
+        ax = axes[i]
+        
+        # Graficar salida completa
+        ax.plot(time_axis, output_data, color=colors[i], linewidth=1.0, alpha=0.8)
+        
+        # Línea del umbral oficial (-0.5)
+        ax.axhline(y=-0.5, color='orange', linestyle='--', linewidth=2, 
+                  label='Umbral Detección (-0.5)')
+        
+        # Línea de ruido base (-4.0)
+        ax.axhline(y=-4.0, color='gray', linestyle=':', linewidth=1, 
+                  label='Línea Base Ruido (-4.0)')
+        
+        # Línea de cero
+        ax.axhline(y=0, color='green', linestyle='-', linewidth=1, alpha=0.5,
+                  label='Cero (Magnitud Positiva)')
+        
+        ax.set_title(f'{slice_names[i]} - Salida CREIME_RT Temporal', fontsize=14, fontweight='bold')
+        ax.set_xlabel('Tiempo (segundos)')
+        ax.set_ylabel('Valor CREIME_RT')
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+        
+        # Estadísticas detalladas
+        mean_val = np.mean(output_data)
+        std_val = np.std(output_data)
+        min_val = np.min(output_data)
+        max_val = np.max(output_data)
+        final_val = output_data[-1]
+        
+        # Análisis por segmentos
+        segment_size = 1000  # 10 segundos por segmento
+        segments_above_threshold = []
+        
+        for seg in range(0, len(output_data), segment_size):
+            segment = output_data[seg:seg+segment_size]
+            above_threshold = np.sum(segment > -0.5)
+            percentage = (above_threshold / len(segment)) * 100
+            segments_above_threshold.append(percentage)
+        
+        # Texto con estadísticas
+        stats_text = (
+            f'Media: {mean_val:.3f}\n'
+            f'Desv: {std_val:.3f}\n'
+            f'Min: {min_val:.3f}\n'
+            f'Max: {max_val:.3f}\n'
+            f'Final: {final_val:.3f}\n'
+            f'> -0.5: {np.sum(output_data > -0.5)}/6000\n'
+            f'({(np.sum(output_data > -0.5)/6000)*100:.1f}%)'
+        )
+        
+        ax.text(0.02, 0.98, stats_text, transform=ax.transAxes, 
+               verticalalignment='top', fontsize=10,
+               bbox=dict(boxstyle='round', facecolor='white', alpha=0.9))
+        
+        # Análisis de evolución temporal
+        if slice_name == 'earthquake':
+            # Encontrar momento de activación
+            activation_indices = np.where(output_data > -0.5)[0]
+            if len(activation_indices) > 0:
+                first_activation = activation_indices[0]
+                activation_time = first_activation / 100  # convertir a segundos
+                ax.axvline(x=activation_time, color='red', linestyle='--', alpha=0.7,
+                          label=f'Primera Activación ({activation_time:.1f}s)')
+                
+                # Momento donde cruza cero (magnitud positiva)
+                positive_indices = np.where(output_data > 0)[0]
+                if len(positive_indices) > 0:
+                    first_positive = positive_indices[0]
+                    positive_time = first_positive / 100
+                    ax.axvline(x=positive_time, color='green', linestyle='--', alpha=0.7,
+                              label=f'Magnitud Positiva ({positive_time:.1f}s)')
+        
+        ax.legend()
+    
+    plt.tight_layout()
+    plt.show()
+    
+    # Análisis comparativo
+    print("\n📊 ANÁLISIS COMPARATIVO SALIDAS CREIME_RT:")
+    for slice_name, output_data in creime_outputs.items():
+        print(f"\n{slice_name.upper()}:")
+        print(f"  Rango: [{np.min(output_data):.3f}, {np.max(output_data):.3f}]")
+        print(f"  Valor final: {output_data[-1]:.3f}")
+        print(f"  Muestras > -0.5: {np.sum(output_data > -0.5)}/6000 ({(np.sum(output_data > -0.5)/6000)*100:.1f}%)")
+        print(f"  Muestras > 0: {np.sum(output_data > 0)}/6000 ({(np.sum(output_data > 0)/6000)*100:.1f}%)")
+        
+        if slice_name == 'earthquake':
+            # Análisis de crecimiento
+            positive_values = output_data[output_data > 0]
+            if len(positive_values) > 0:
+                print(f"  Magnitud máxima detectada: {np.max(positive_values):.3f}")
+                print(f"  Magnitud promedio (valores > 0): {np.mean(positive_values):.3f}")
+
 def analyze_creime_output(slices):
-    """Analiza la salida de CREIME_RT"""
+    """Analiza la salida de CREIME_RT y guarda vectores completos"""
     print("\n" + "="*60)
     print("ANÁLISIS DE SALIDA CREIME_RT")
     print("="*60)
+    
+    creime_outputs = {}  # Para guardar las salidas completas
     
     try:
         from saipy.models.creime import CREIME_RT
@@ -220,6 +332,10 @@ def analyze_creime_output(slices):
             print(f"   Tipo y_pred: {type(y_pred)}")
             print(f"   Forma y_pred: {y_pred.shape if hasattr(y_pred, 'shape') else 'N/A'}")
             print(f"   Tipo predictions: {type(predictions)}")
+            
+            # GUARDAR SALIDA COMPLETA PARA VISUALIZACIÓN
+            if y_pred is not None and hasattr(y_pred, 'shape') and len(y_pred.shape) > 1:
+                creime_outputs[slice_name] = y_pred[0].copy()  # Guardar vector completo
             
             # Analizar y_pred (salida principal)
             if y_pred is not None:
@@ -268,12 +384,20 @@ def analyze_creime_output(slices):
                     print(f"   Magnitud estimada: {pred[1] if len(pred) > 1 else 'N/A'}")
             
             print(f"\n{'='*40}")
+        
+        # VISUALIZAR SALIDAS COMPLETAS
+        if creime_outputs:
+            plot_creime_output(creime_outputs, 100)
+        
+        return creime_outputs
     
     except ImportError:
         print("❌ Error: SAIPy no está disponible")
         print("   Instale SAIPy para ejecutar CREIME_RT")
+        return {}
     except Exception as e:
         print(f"❌ Error ejecutando CREIME_RT: {e}")
+        return {}
 
 def main():
     """Función principal"""
@@ -291,8 +415,8 @@ def main():
         # 2. Graficar datos
         plot_data(slices, sampling_rate)
         
-        # 3. Analizar salida CREIME_RT
-        analyze_creime_output(slices)
+        # 3. Analizar salida CREIME_RT y obtener vectores completos
+        creime_outputs = analyze_creime_output(slices)
         
         print("\n" + "="*60)
         print("ANÁLISIS COMPLETADO")
