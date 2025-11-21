@@ -653,10 +653,10 @@ class MiniSeedSimulator:
         # Parámetros según documentación oficial CREIME_RT
         self.window_size = 10 * sampling_rate  # 1000 muestras - 10 segundos
         self.latency_target = 0.1 / playback_speed  # Ajustado por velocidad
-        self.detection_threshold = -1.5  # Más sensible que -0.5
+        self.detection_threshold = -2.0  # Aún más sensible para diagnóstico
         self.noise_baseline = -4.0
-        self.magnitude_threshold = 0.3  # Más sensible que 0.6
-        self.consecutive_windows = 3  # Menos restrictivo que 5
+        self.magnitude_threshold = 0.1  # Muy sensible para diagnóstico
+        self.consecutive_windows = 2  # Mínimo para detección rápida
         
         # Componentes del sistema
         self.buffer = UltraFastBuffer(
@@ -690,6 +690,9 @@ class MiniSeedSimulator:
         self.miniseed_start_time = None
         self.miniseed_duration = 0
         self.simulation_start_time = None
+        
+        # Rastreo de valores CREIME_RT para diagnóstico
+        self.creime_values = []
         
         # Hilos
         self.data_thread = None
@@ -1037,6 +1040,8 @@ class MiniSeedSimulator:
                     result = self.ultra_fast_processing()
                     
                     if result:
+                        # Capturar valor para estadísticas
+                        self.creime_values.append(result['confidence'])
                         if result['confidence'] > self.detection_threshold:
                             status = " EVENTO_DETECTADO"
                         elif result['confidence'] <= self.noise_baseline:
@@ -1046,12 +1051,19 @@ class MiniSeedSimulator:
                         
                         mag_display = f"{result['magnitude']:.1f}" if result['magnitude'] is not None else "N/A"
                         
-                        # Logging más detallado para diagnóstico
-                        if result['processing_id'] % 50 == 0 or result['confidence'] > -2.0:
+                        # Logging detallado para diagnóstico del sismo
+                        elapsed_sim_time = (result['processing_id'] * 0.1) / 60  # minutos desde inicio
+                        target_time = 2.0  # sismo esperado a ~2 minutos (08:32:58 - 08:30:59)
+                        
+                        # Log más frecuente cerca del tiempo del sismo esperado
+                        if (abs(elapsed_sim_time - target_time) < 0.5 or  # ±30s del sismo
+                            result['processing_id'] % 100 == 0 or  # cada 10s normalmente
+                            result['confidence'] > -2.0):  # cualquier actividad
+                            
                             logging.info(
-                                f"Procesado {result['processing_id']}: {status} | "
-                                f"Mag: {mag_display} | Raw: {result['confidence']:.6f} | "
-                                f"Tiempo: {result['processing_time']:.3f}s"
+                                f"T+{elapsed_sim_time:.1f}min | Ventana {result['processing_id']}: {status} | "
+                                f"Raw: {result['confidence']:.6f} | Mag: {mag_display} | "
+                                f"Umbral: {self.detection_threshold} | Tiempo: {result['processing_time']:.3f}s"
                             )
                         
                         detection_info = self.evaluate_detection(result)
@@ -1147,6 +1159,19 @@ class MiniSeedSimulator:
             logging.info(f"  Tasa procesamiento: {processing_rate:.2f} ventanas/segundo")
             logging.info(f"")
             logging.info(f"Eventos Detectados: {len(self.detected_events)}")
+            
+            # Estadísticas de valores CREIME_RT para diagnóstico
+            if hasattr(self, 'creime_values') and self.creime_values:
+                min_val = min(self.creime_values)
+                max_val = max(self.creime_values)
+                mean_val = sum(self.creime_values) / len(self.creime_values)
+                above_threshold = sum(1 for v in self.creime_values if v > self.detection_threshold)
+                logging.info(f"")
+                logging.info(f"Estadísticas CREIME_RT:")
+                logging.info(f"  Valores mínimo/máximo: {min_val:.6f} / {max_val:.6f}")
+                logging.info(f"  Valor promedio: {mean_val:.6f}")
+                logging.info(f"  Ventanas > umbral ({self.detection_threshold}): {above_threshold}/{len(self.creime_values)}")
+                logging.info(f"  Porcentaje activación: {(above_threshold/len(self.creime_values)*100):.2f}%")
             
             if self.detected_events:
                 logging.info(f"Detalle de Eventos:")
