@@ -19,7 +19,7 @@ import json
 import sys
 import uuid
 from obspy import read, Stream, Trace, UTCDateTime
-from obspy.core import Stats
+from obspy.core.stats import Stats
 
 # ===== CONFIGURACIÓN GPU SEGURA PARA JETSON ORIN NANO =====
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
@@ -131,7 +131,7 @@ class RealTimeVisualizer:
             self.fig, self.axes = plt.subplots(3, 1, figsize=(16, 10), dpi=120)
             self.ax1, self.ax2, self.ax3 = self.axes
             
-            self.fig.suptitle('CREIME_RT SIMULATOR - Datos Procesados (Filtrado + Z-Score)', 
+            self.fig.suptitle('CREIME_RT SIMULATOR - Datos Filtrados [1.0-45.0 Hz]', 
                              fontsize=16, fontweight='bold')
             
             self.line_enz, = self.ax1.plot([], [], color=COLOR_TEAL, linewidth=1.0, label='ENZ')
@@ -145,7 +145,7 @@ class RealTimeVisualizer:
             ]
             
             for ax, title, color in components_config:
-                ax.set_ylabel('Amplitud Normalizada (Z-Score)', fontsize=12)
+                ax.set_ylabel('Amplitud Filtrada', fontsize=12)
                 ax.set_title(title, fontsize=14, fontweight='bold')
                 ax.grid(True, alpha=0.3)
                 ax.axhline(y=0, color='k', linestyle='-', alpha=0.3)
@@ -433,6 +433,13 @@ class UltraFastBuffer:
                 else:
                     start_idx = buf_len - self.window_size
                     component_data = [buf[i] for i in range(start_idx, buf_len)]
+                
+                # Aplicar normalización z-score a la ventana completa (10 segundos)
+                if len(component_data) > 1:
+                    mean_val = np.mean(component_data)
+                    std_val = np.std(component_data)
+                    if std_val > 0:
+                        component_data = [(x - mean_val) / std_val for x in component_data]
                 
                 window_data.append(component_data)
             
@@ -785,26 +792,18 @@ class MiniSeedSimulator:
                         tr = self.stream_data[component]
                         packet_data = tr.data[sample_index:sample_index + samples_per_packet]
                         
-                        # Procesamiento unificado: filtrado + normalización z-score
+                        # Aplicar solo filtrado, normalización z-score se hace globalmente
                         filtered_data = self.hybrid_filter.apply_filter(packet_data.tolist())
-                        if len(filtered_data) > 1:
-                            mean_val = np.mean(filtered_data)
-                            std_val = np.std(filtered_data)
-                            if std_val > 0:
-                                processed_data = [(x - mean_val) / std_val for x in filtered_data]
-                            else:
-                                processed_data = filtered_data
-                        else:
-                            processed_data = filtered_data
                         
-                        # Los mismos datos para visualización y CREIME_RT
-                        unified_data = processed_data
+                        # Los mismos datos filtrados para visualización y CREIME_RT
+                        unified_data = filtered_data
                         
                         # Diagnóstico para primeros paquetes
                         if self.packet_count < 3:
                             logging.info(f"Paquete {self.packet_count} {component}:")
                             logging.info(f"  Original MiniSEED: {packet_data[:3]}... (rango: {np.min(packet_data):.6f} a {np.max(packet_data):.6f})")
-                            logging.info(f"  Procesado (Vis + CREIME_RT): {unified_data[:3]}... (rango: {np.min(unified_data):.6f} a {np.max(unified_data):.6f})")
+                            logging.info(f"  Filtrado [1-45Hz]: {unified_data[:3]}... (rango: {np.min(unified_data):.6f} a {np.max(unified_data):.6f})")
+                            logging.info(f"  Nota: Z-Score se aplica por ventana de 10s en CREIME_RT")
                         
                         # Usar los mismos datos procesados para buffer y visualizador
                         current_time = time.time()
