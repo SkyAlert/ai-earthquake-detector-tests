@@ -225,17 +225,24 @@ class RealTimeVisualizer:
         return -limit, limit
     
     def update_data(self, component, data, timestamp):
-        """Actualización de datos para visualización"""
+        """Actualización de datos para visualización sincronizada con MiniSEED"""
         if not self.visualization_enabled:
             return
             
-        current_time = time.time()
+        # Usar timestamp MiniSEED si está disponible
+        if hasattr(self.detector, 'miniseed_start_time') and self.detector.miniseed_start_time:
+            samples_processed = self.detector.packet_count * 10
+            file_elapsed = samples_processed / SAMPLING_RATE
+            miniseed_time = self.detector.miniseed_start_time.timestamp + file_elapsed
+            base_time = miniseed_time
+        else:
+            base_time = time.time()
         
         with self.lock:
             self.packet_count += 1
             
             for i, value in enumerate(data):
-                sample_time = current_time - (len(data) - i) * (1.0 / SAMPLING_RATE)
+                sample_time = base_time - (len(data) - i) * (1.0 / SAMPLING_RATE)
                 
                 if component == 'ENZ':
                     self.times.append(sample_time)
@@ -916,10 +923,11 @@ class MiniSeedSimulator:
             else:
                 raw_output = self.noise_baseline
             
-            # Calcular tiempo MiniSEED correspondiente
-            if self.miniseed_start_time and self.simulation_start_time:
-                elapsed_simulation = time.time() - self.simulation_start_time
-                miniseed_time = self.miniseed_start_time + elapsed_simulation
+            # Calcular tiempo MiniSEED basado en posición real en el archivo
+            if self.miniseed_start_time:
+                samples_processed = self.packet_count * 10  # 10 muestras por paquete
+                file_elapsed = samples_processed / self.sampling_rate
+                miniseed_time = self.miniseed_start_time + file_elapsed
                 logging.info(f"[{miniseed_time}] CREIME_RT Raw Output: {raw_output:.6f}")
             else:
                 logging.info(f"CREIME_RT Raw Output: {raw_output:.6f}")
@@ -928,9 +936,10 @@ class MiniSeedSimulator:
             
         except (IndexError, TypeError, ValueError) as e:
             logging.warning(f"Error extrayendo salida CREIME_RT: {e}")
-            if self.miniseed_start_time and self.simulation_start_time:
-                elapsed_simulation = time.time() - self.simulation_start_time
-                miniseed_time = self.miniseed_start_time + elapsed_simulation
+            if self.miniseed_start_time:
+                samples_processed = self.packet_count * 10
+                file_elapsed = samples_processed / self.sampling_rate
+                miniseed_time = self.miniseed_start_time + file_elapsed
                 logging.info(f"[{miniseed_time}] CREIME_RT Raw Output: {self.noise_baseline:.6f} (error)")
             else:
                 logging.info(f"CREIME_RT Raw Output: {self.noise_baseline:.6f} (error)")
@@ -973,10 +982,11 @@ class MiniSeedSimulator:
         self.detection_count += 1
         self.last_detection_time = detection_result['timestamp']
         
-        # Calcular tiempo real del evento en el MiniSEED
-        if self.miniseed_start_time and self.simulation_start_time:
-            elapsed_simulation = time.time() - self.simulation_start_time
-            miniseed_event_time = self.miniseed_start_time + elapsed_simulation
+        # Calcular tiempo real del evento en el MiniSEED basado en posición del archivo
+        if self.miniseed_start_time:
+            samples_processed = self.packet_count * 10  # 10 muestras por paquete
+            file_elapsed = samples_processed / self.sampling_rate
+            miniseed_event_time = self.miniseed_start_time + file_elapsed
         else:
             miniseed_event_time = detection_result['timestamp']
         
@@ -1076,9 +1086,10 @@ class MiniSeedSimulator:
                         self.creime_values.append(result['confidence'])
                         
                         # Capturar timestamp MiniSEED correspondiente
-                        if self.miniseed_start_time and self.simulation_start_time:
-                            elapsed_simulation = time.time() - self.simulation_start_time
-                            miniseed_time = self.miniseed_start_time + elapsed_simulation
+                        if self.miniseed_start_time:
+                            samples_processed = self.packet_count * 10  # 10 muestras por paquete
+                            file_elapsed = samples_processed / self.sampling_rate
+                            miniseed_time = self.miniseed_start_time + file_elapsed
                             self.creime_timestamps.append(miniseed_time)
                         else:
                             self.creime_timestamps.append(result['timestamp'])
@@ -1125,6 +1136,21 @@ class MiniSeedSimulator:
             daemon=True
         )
         self.processing_thread.start()
+        
+        # Esperar a que el modelo CREIME_RT se cargue antes de iniciar visualizador
+        logging.info("Esperando carga del modelo CREIME_RT...")
+        model_loaded = False
+        start_wait = time.time()
+        while not model_loaded and (time.time() - start_wait < 30):
+            time.sleep(0.5)
+            # Verificar si hay workers activos (modelo cargado)
+            if hasattr(self.processing_pipeline, 'workers') and len(self.processing_pipeline.workers) > 0:
+                model_loaded = True
+        
+        if model_loaded:
+            logging.info("Modelo CREIME_RT cargado - Iniciando visualizador")
+        else:
+            logging.warning("Timeout esperando modelo - Iniciando visualizador de todos modos")
         
         # Iniciar visualizador
         self.visualizer.start_visualization()
