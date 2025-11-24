@@ -578,7 +578,7 @@ class UltraFastProcessingPipeline:
                     else:
                         raw_output = -4.0
                     
-                    if raw_output > -0.5:
+                    if raw_output > -1.80:
                         detection = 1
                         magnitude = max(raw_output, 0.0) if raw_output > 0 else None
                     else:
@@ -657,10 +657,11 @@ class MiniSeedSimulator:
         # Parámetros según documentación oficial CREIME_RT
         self.window_size = 30 * sampling_rate  # 3000 muestras - 30 SEGUNDOS (oficial)
         self.latency_target = 0.1 / playback_speed  # Ajustado por velocidad
-        self.detection_threshold = -0.5  # Umbral oficial documentación
+        self.detection_threshold = -1.80  # Nuevo umbral de detección
         self.noise_baseline = -4.0
+        self.high_noise_threshold = -1.80  # Umbral para ruido alto
         self.magnitude_threshold = 1.0  # Ajustado según análisis (máximo 1.6)
-        self.consecutive_windows = 3  # Reducido para detección más rápida
+        self.consecutive_windows = 2  # Cambiado a 2 ventanas consecutivas
         
         # Componentes del sistema
         self.buffer = UltraFastBuffer(
@@ -701,6 +702,7 @@ class MiniSeedSimulator:
         
         # Rastreo de valores CREIME_RT para diagnóstico
         self.creime_values = []
+        self.creime_timestamps = []  # Timestamps MiniSEED correspondientes
         
         # Hilos
         self.data_thread = None
@@ -711,6 +713,7 @@ class MiniSeedSimulator:
         logging.info(f"VELOCIDAD REPRODUCCIÓN: {playback_speed}x")
         logging.info(f"VENTANA: {self.window_size} muestras ({self.window_size/sampling_rate} segundos)")
         logging.info(f"UMBRAL DETECCIÓN: {self.detection_threshold} (oficial CREIME_RT)")
+        logging.info(f"UMBRAL RUIDO ALTO: {self.high_noise_threshold}")
         logging.info(f"VENTANAS CONSECUTIVAS: {self.consecutive_windows}")
     
     def load_miniseed_data(self):
@@ -913,12 +916,24 @@ class MiniSeedSimulator:
             else:
                 raw_output = self.noise_baseline
             
-            logging.info(f"CREIME_RT Raw Output: {raw_output:.6f}")
+            # Calcular tiempo MiniSEED correspondiente
+            if self.miniseed_start_time and self.simulation_start_time:
+                elapsed_simulation = time.time() - self.simulation_start_time
+                miniseed_time = self.miniseed_start_time + elapsed_simulation
+                logging.info(f"[{miniseed_time}] CREIME_RT Raw Output: {raw_output:.6f}")
+            else:
+                logging.info(f"CREIME_RT Raw Output: {raw_output:.6f}")
+            
             return raw_output
             
         except (IndexError, TypeError, ValueError) as e:
             logging.warning(f"Error extrayendo salida CREIME_RT: {e}")
-            logging.info(f"CREIME_RT Raw Output: {self.noise_baseline:.6f} (error)")
+            if self.miniseed_start_time and self.simulation_start_time:
+                elapsed_simulation = time.time() - self.simulation_start_time
+                miniseed_time = self.miniseed_start_time + elapsed_simulation
+                logging.info(f"[{miniseed_time}] CREIME_RT Raw Output: {self.noise_baseline:.6f} (error)")
+            else:
+                logging.info(f"CREIME_RT Raw Output: {self.noise_baseline:.6f} (error)")
             return self.noise_baseline
     
     def evaluate_detection(self, result):
@@ -1056,31 +1071,16 @@ class MiniSeedSimulator:
                     result = self.ultra_fast_processing()
                     
                     if result:
-                        # Capturar valor para estadísticas
+                        # Capturar valor y timestamp para estadísticas
                         self.creime_values.append(result['confidence'])
-                        if result['confidence'] > self.detection_threshold:
-                            status = " EVENTO_DETECTADO"
-                        elif result['confidence'] <= self.noise_baseline:
-                            status = " RUIDO_PURO"
+                        
+                        # Capturar timestamp MiniSEED correspondiente
+                        if self.miniseed_start_time and self.simulation_start_time:
+                            elapsed_simulation = time.time() - self.simulation_start_time
+                            miniseed_time = self.miniseed_start_time + elapsed_simulation
+                            self.creime_timestamps.append(miniseed_time)
                         else:
-                            status = " SEÑAL_MIXTA"
-                        
-                        mag_display = f"{result['magnitude']:.1f}" if result['magnitude'] is not None else "N/A"
-                        
-                        # Logging detallado para diagnóstico del sismo
-                        elapsed_sim_time = (result['processing_id'] * 0.1) / 60  # minutos desde inicio
-                        target_time = 2.0  # sismo esperado a ~2 minutos (08:32:58 - 08:30:59)
-                        
-                        # Log más frecuente cerca del tiempo del sismo esperado
-                        if (abs(elapsed_sim_time - target_time) < 0.5 or  # ±30s del sismo
-                            result['processing_id'] % 100 == 0 or  # cada 10s normalmente
-                            result['confidence'] > -2.0):  # cualquier actividad
-                            
-                            logging.info(
-                                f"T+{elapsed_sim_time:.1f}min | Ventana {result['processing_id']}: {status} | "
-                                f"Raw: {result['confidence']:.6f} | Mag: {mag_display} | "
-                                f"Umbral: {self.detection_threshold} | Tiempo: {result['processing_time']:.3f}s"
-                            )
+                            self.creime_timestamps.append(result['timestamp'])
                         
                         detection_info = self.evaluate_detection(result)
                         if detection_info:
@@ -1148,6 +1148,80 @@ class MiniSeedSimulator:
         
         return True
     
+    def plot_creime_output_timeline(self):
+        """Genera gráfico de raw output CREIME_RT vs tiempo MiniSEED"""
+        if not self.creime_values or not VISUALIZATION_ENABLED:
+            return
+            
+        try:
+            import matplotlib.pyplot as plt
+            import matplotlib.dates as mdates
+            from datetime import datetime
+            
+            # Convertir timestamps a datetime si es necesario
+            if self.creime_timestamps:
+                times = []
+                for ts in self.creime_timestamps:
+                    if hasattr(ts, 'datetime'):
+                        times.append(ts.datetime)
+                    elif isinstance(ts, datetime):
+                        times.append(ts)
+                    else:
+                        times.append(datetime.fromisoformat(str(ts).replace('Z', '+00:00')))
+            else:
+                # Fallback si no hay timestamps
+                times = list(range(len(self.creime_values)))
+            
+            # Crear gráfico
+            fig, ax = plt.subplots(figsize=(16, 8))
+            
+            # Plotear raw output
+            ax.plot(times, self.creime_values, 'b-', linewidth=1.0, alpha=0.8, label='CREIME_RT Raw Output')
+            
+            # Líneas de umbrales
+            ax.axhline(y=self.detection_threshold, color='red', linestyle='--', linewidth=2, 
+                      label=f'Umbral Detección ({self.detection_threshold})')
+            ax.axhline(y=self.noise_baseline, color='gray', linestyle='--', linewidth=1, 
+                      label=f'Línea Base Ruido ({self.noise_baseline})')
+            ax.axhline(y=0, color='green', linestyle='--', linewidth=1, 
+                      label='Cero (Magnitud Positiva)')
+            ax.axhline(y=self.magnitude_threshold, color='orange', linestyle='--', linewidth=1, 
+                      label=f'Umbral Magnitud ({self.magnitude_threshold})')
+            
+            # Configuración del gráfico
+            ax.set_xlabel('Tiempo MiniSEED', fontsize=12)
+            ax.set_ylabel('CREIME_RT Raw Output', fontsize=12)
+            ax.set_title('Evolución Temporal CREIME_RT - Simulador', fontsize=14, fontweight='bold')
+            ax.grid(True, alpha=0.3)
+            ax.legend()
+            
+            # Formatear eje X si son timestamps reales
+            if self.creime_timestamps and hasattr(self.creime_timestamps[0], 'datetime'):
+                ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
+                ax.xaxis.set_major_locator(mdates.SecondLocator(interval=30))
+                plt.setp(ax.xaxis.get_majorticklabels(), rotation=45)
+            
+            # Estadísticas en el gráfico
+            stats_text = (
+                f'Valores: {len(self.creime_values)}\n'
+                f'Mínimo: {min(self.creime_values):.3f}\n'
+                f'Máximo: {max(self.creime_values):.3f}\n'
+                f'Promedio: {sum(self.creime_values)/len(self.creime_values):.3f}\n'
+                f'Detecciones: {sum(1 for v in self.creime_values if v > self.detection_threshold)}'
+            )
+            
+            ax.text(0.02, 0.98, stats_text, transform=ax.transAxes, 
+                   verticalalignment='top', fontsize=10,
+                   bbox=dict(boxstyle='round', facecolor='white', alpha=0.9))
+            
+            plt.tight_layout()
+            plt.show()
+            
+            logging.info("Gráfico de raw output generado")
+            
+        except Exception as e:
+            logging.error(f"Error generando gráfico: {e}")
+    
     def stop_simulation(self):
         """Detiene el simulador"""
         self.running = False
@@ -1210,6 +1284,9 @@ class MiniSeedSimulator:
                 logging.info(f"  o ajuste los umbrales de detección")
             
             logging.info(f"{'='*60}")
+            
+            # Generar gráfico de raw output
+            self.plot_creime_output_timeline()
 
 def main():
     """Función principal del simulador"""
