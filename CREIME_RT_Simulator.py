@@ -19,7 +19,7 @@ import json
 import sys
 import uuid
 from obspy import read, Stream, Trace, UTCDateTime
-from obspy.core.stats import Stats
+from obspy.core import Stats
 
 # ===== CONFIGURACIÓN GPU SEGURA PARA JETSON ORIN NANO =====
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
@@ -225,17 +225,28 @@ class RealTimeVisualizer:
         return -limit, limit
     
     def update_data(self, component, data, timestamp):
-        """Actualización de datos para visualización"""
+        """Actualización de datos para visualización sincronizada"""
         if not self.visualization_enabled:
             return
             
-        current_time = time.time()
+        # Usar tiempo relativo desde inicio del archivo MiniSEED
+        if hasattr(self.detector, 'packet_count') and hasattr(self.detector, 'sampling_rate'):
+            # Calcular posición actual en el archivo (segundos desde inicio)
+            samples_processed = self.detector.packet_count * 10  # 10 muestras por paquete
+            file_elapsed = samples_processed / self.detector.sampling_rate
+            
+            # Usar tiempo de archivo como base
+            base_time = file_elapsed
+        else:
+            # Fallback a tiempo real si no hay datos del detector
+            base_time = time.time()
         
         with self.lock:
             self.packet_count += 1
             
             for i, value in enumerate(data):
-                sample_time = current_time - (len(data) - i) * (1.0 / SAMPLING_RATE)
+                # Tiempo relativo: posición en archivo - offset por muestra
+                sample_time = base_time - (len(data) - i) * (1.0 / SAMPLING_RATE)
                 
                 if component == 'ENZ':
                     self.times.append(sample_time)
@@ -268,8 +279,14 @@ class RealTimeVisualizer:
         ene_trim = ene_copy[-min_len:]
         enn_trim = enn_copy[-min_len:]
         
-        current_time_sec = time.time()
-        rel_times = current_time_sec - times_trim
+        # Calcular tiempo relativo desde posición actual en el archivo
+        if hasattr(self.detector, 'packet_count') and len(times_trim) > 0:
+            current_file_time = times_trim[-1]  # Último tiempo (posición actual)
+            rel_times = current_file_time - times_trim  # Tiempo relativo hacia atrás
+        else:
+            # Fallback
+            current_time_sec = time.time()
+            rel_times = current_time_sec - times_trim
         
         self.line_enz.set_data(rel_times, enz_trim)
         self.line_ene.set_data(rel_times, ene_trim)
