@@ -1026,10 +1026,11 @@ class MiniSeedSimulator:
             raw_confidence = detection_result['confidence']
             corrected_magnitude = self._apply_magnitude_correction(raw_confidence)
             
+            mag_original = f"{detection_result['magnitude']:.1f}" if detection_result['magnitude'] is not None else "N/A"
             alert_message = (
                 f"🚨 SIMULADOR: SISMO CONFIRMADO 🚨\n"
                 f"Salida CREIME_RT: {detection_result['confidence']:.2f}\n"
-                f"Magnitud Original: {detection_result['magnitude']:.1f if detection_result['magnitude'] else 'N/A'}\n"
+                f"Magnitud Original: {mag_original}\n"
                 f"Magnitud Corregida: {corrected_magnitude:.1f}\n"
                 f"Ventanas consecutivas: {detection_info['consecutive_detections']}/{self.consecutive_windows}\n"
                 f"Ventana: {detection_result['processing_id']}\n"
