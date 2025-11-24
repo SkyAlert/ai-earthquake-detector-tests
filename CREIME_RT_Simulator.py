@@ -974,7 +974,7 @@ class MiniSeedSimulator:
                     return {
                         'type': 'event_confirmed',
                         'consecutive_detections': consecutive_count,
-                        'is_seismic': self._is_seismic_event(result)
+                        'is_seismic': True  # Confirmación automática con 2 ventanas consecutivas
                     }
         else:
             self.detection_buffer.append(False)
