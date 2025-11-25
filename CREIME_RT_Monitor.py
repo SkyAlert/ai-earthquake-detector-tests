@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-SISTEMA DE ALERTA SÍSMICA TEMPRANA - LATENCIA MÍNIMA
-Sistema optimizado para Jetson Orin Nano con operación 24/7
+CREIME_RT MONITOR - Sistema de Alerta Sísmica en Tiempo Real
+Monitor que usa la lógica del simulador pero con datos en tiempo real de AnyShake
 """
 
 import os
@@ -17,9 +17,10 @@ import psutil
 import gc
 import queue
 import json
-import glob
 import sys
-import subprocess
+import uuid
+from obspy import Stream, Trace, UTCDateTime
+from obspy.core.stats import Stats
 
 # ===== CONFIGURACIÓN GPU SEGURA PARA JETSON ORIN NANO =====
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
@@ -30,7 +31,7 @@ log_dir = "logs"
 if not os.path.exists(log_dir):
     os.makedirs(log_dir)
 
-log_file = os.path.join(log_dir, "seismic_system.log")
+log_file = os.path.join(log_dir, "creime_rt_monitor.log")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -58,7 +59,7 @@ except Exception as e:
     logging.warning(f"Error configurando matplotlib: {e} - visualización desactivada")
 
 # Constantes de visualización
-DISPLAY_SECONDS = 30
+DISPLAY_SECONDS = 60
 SAMPLING_RATE = 100
 MAX_VISUALIZATION_SAMPLES = DISPLAY_SECONDS * SAMPLING_RATE
 
@@ -74,9 +75,7 @@ COLOR_RED = '#FF0000'
 COLOR_GREEN = '#00FF00'
 
 class RealTimeVisualizer:
-    """
-    Sistema de visualización en tiempo real CON MARCADORES CREIME_RT
-    """
+    """Sistema de visualización para monitor en tiempo real"""
     
     def __init__(self, seismic_detector):
         self.detector = seismic_detector
@@ -98,9 +97,7 @@ class RealTimeVisualizer:
         
         # Marcadores de ventana CREIME_RT
         self.creime_markers = []
-        self.creime_window_start = None
-        self.creime_window_end = None
-        self.last_processing_time = 0
+        self.processing_window_markers = []
         
         # Historial de máximos para ajuste suave
         self.max_values_history = {
@@ -117,12 +114,11 @@ class RealTimeVisualizer:
         self.setup_visualization()
     
     def setup_visualization(self):
-        """Configuración con marcadores CREIME_RT"""
+        """Configuración de visualización para monitor"""
         if not self.visualization_enabled:
             return
             
         try:
-            # Configuración profesional de matplotlib
             plt.rcParams.update({
                 'font.size': 12,
                 'axes.titlesize': 14,
@@ -133,20 +129,16 @@ class RealTimeVisualizer:
                 'figure.titlesize': 16
             })
             
-            # Configuración de la visualización - 3 subgráficas
             self.fig, self.axes = plt.subplots(3, 1, figsize=(16, 10), dpi=120)
             self.ax1, self.ax2, self.ax3 = self.axes
             
-            # Título principal
-            self.fig.suptitle('SKYALERT AI-SEISMIC STATION ORIN_NANO', 
+            self.fig.suptitle('CREIME_RT MONITOR - Datos en Tiempo Real', 
                              fontsize=16, fontweight='bold')
             
-            # Líneas de gráfico
             self.line_enz, = self.ax1.plot([], [], color=COLOR_TEAL, linewidth=1.0, label='ENZ')
             self.line_ene, = self.ax2.plot([], [], color=COLOR_TEAL, linewidth=1.0, label='ENE')
             self.line_enn, = self.ax3.plot([], [], color=COLOR_TEAL, linewidth=1.0, label='ENN')
             
-            # Configurar ejes
             components_config = [
                 (self.ax1, 'Componente Vertical (ENZ)', COLOR_TEAL),
                 (self.ax2, 'Componente Este-Oeste (ENE)', COLOR_TEAL),
@@ -163,97 +155,70 @@ class RealTimeVisualizer:
             
             self.ax3.set_xlabel('Tiempo (segundos)', fontsize=12)
             
-            # Texto para mostrar información del sistema
             self.info_text = self.ax3.text(0.02, 0.95, '', transform=self.ax3.transAxes, 
                                           fontsize=10, verticalalignment='top', color=COLOR_ORANGE,
                                           bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
             
-            # Inicializar marcadores CREIME_RT
-            self.setup_creime_markers()
+            # Configurar marcadores de ventana de procesamiento
+            self.setup_processing_markers()
             
             plt.tight_layout(rect=[0, 0, 1, 0.96])
-            logging.info("Visualizador configurado correctamente con marcadores CREIME_RT")
+            logging.info("Visualizador del monitor configurado correctamente")
             
         except Exception as e:
             logging.error(f"Error configurando visualización: {e}")
             self.visualization_enabled = False
     
-    def setup_creime_markers(self):
-        """Configura los marcadores visuales para la ventana CREIME_RT"""
+    def setup_processing_markers(self):
+        """Configura marcadores de ventana de procesamiento CREIME_RT"""
+        if not self.visualization_enabled:
+            return
+            
         try:
-            # Crear líneas verticales punteadas para marcar la ventana CREIME_RT
             for ax in [self.ax1, self.ax2, self.ax3]:
-                # Línea de inicio de ventana (2 segundos atrás)
-                start_line = ax.axvline(x=0, color=COLOR_RED, linestyle='--', 
-                                      linewidth=2, alpha=0.7, label='Inicio Ventana CREIME_RT')
-                # Línea de fin de ventana (tiempo actual de procesamiento)
-                end_line = ax.axvline(x=0, color=COLOR_RED, linestyle='-', 
-                                    linewidth=2, alpha=0.7, label='Fin Ventana CREIME_RT')
+                if ax is None:
+                    continue
+                # Línea vertical para marcar ventana actual de procesamiento
+                window_line = ax.axvline(x=0, color=COLOR_GREEN, linestyle='-', 
+                                       linewidth=3, alpha=0.8, label='Ventana CREIME_RT (30s)')
+                # Área sombreada para ventana de procesamiento
+                window_fill = ax.axvspan(0, 30, color=COLOR_GREEN, alpha=0.15)
                 
-                # Área sombreada entre las líneas
-                fill = ax.axvspan(0, 0, color=COLOR_RED, alpha=0.1, label='Ventana CREIME_RT (2s)')
-                
-                self.creime_markers.append({
-                    'start_line': start_line,
-                    'end_line': end_line,
-                    'fill': fill
+                self.processing_window_markers.append({
+                    'line': window_line,
+                    'fill': window_fill
                 })
             
-            # Agregar leyenda para los marcadores (solo en el primer subplot)
+            # Agregar leyenda solo en el primer subplot
             self.ax1.legend(loc='upper left', fontsize=9)
             
         except Exception as e:
-            logging.error(f"Error configurando marcadores CREIME_RT: {e}")
-    
-    def update_creime_markers(self, current_time_sec, rel_times):
-        """Actualiza la posición de los marcadores CREIME_RT"""
-        if not hasattr(self.detector, 'last_processing_time'):
-            return
-            
-        processing_time = self.detector.last_processing_time
-        
-        # Solo actualizar si tenemos un tiempo de procesamiento válido
-        if processing_time > 0:
-            # Calcular posición relativa del fin de la ventana (último procesamiento)
-            end_pos = current_time_sec - processing_time
-            
-            # La ventana CREIME_RT es de 2 segundos, calcular inicio
-            start_pos = end_pos + 2  # 2 segundos de ventana
-            
-            # Verificar que las posiciones estén dentro del rango visible
-            if start_pos > DISPLAY_SECONDS:
-                start_pos = DISPLAY_SECONDS
-            if end_pos < 0:
-                end_pos = 0
-            
-            # Actualizar marcadores en todos los subplots
-            for markers in self.creime_markers:
-                markers['start_line'].set_xdata([start_pos, start_pos])
-                markers['end_line'].set_xdata([end_pos, end_pos])
-                
-                # Actualizar área sombreada
-                markers['fill'].remove()
-                ax = markers['start_line'].axes
-                new_fill = ax.axvspan(start_pos, end_pos, color=COLOR_RED, alpha=0.1)
-                markers['fill'] = new_fill
+            logging.error(f"Error configurando marcadores de procesamiento: {e}")
     
     def calculate_dynamic_ylimits(self, data, component_name):
-        """Algoritmo para escalado dinámico"""
+        """Algoritmo mejorado para escalado dinámico con mejor resolución"""
         if len(data) == 0:
             return -1, 1
         
-        current_max = np.max(np.abs(data))
-        self.max_values_history[component_name].append(current_max)
+        # Usar percentiles para mejor escalado
+        p95 = np.percentile(np.abs(data), 95)
+        p99 = np.percentile(np.abs(data), 99)
+        
+        self.max_values_history[component_name].append(p95)
         
         if len(self.max_values_history[component_name]) > 0:
-            historical_max = np.percentile(list(self.max_values_history[component_name]), 90)
-            target_max = max(current_max, historical_max)
+            # Usar percentil 75 del historial para estabilidad
+            historical_max = np.percentile(list(self.max_values_history[component_name]), 75)
+            target_max = max(p99, historical_max)
         else:
-            target_max = current_max
+            target_max = p99
         
-        margin = 1.25
+        # Margen más ajustado para mejor resolución
+        margin = 1.1
         limit = target_max * margin
-        min_limit = 0.1
+        
+        # Límite mínimo más pequeño para señales débiles
+        min_limit = max(0.01, target_max * 0.1)
         
         if limit < min_limit:
             limit = min_limit
@@ -261,7 +226,7 @@ class RealTimeVisualizer:
         return -limit, limit
     
     def update_data(self, component, data, timestamp):
-        """Actualización de datos para visualización"""
+        """Actualización de datos para visualización en tiempo real"""
         if not self.visualization_enabled:
             return
             
@@ -282,12 +247,9 @@ class RealTimeVisualizer:
                     self.data_enn.append(value)
     
     def update_plot(self, frame):
-        """Actualización de gráficos CON MARCADORES CREIME_RT"""
+        """Actualización de gráficos"""
         if not self.visualization_enabled or not self.fig:
-            artists = [self.line_enz, self.line_ene, self.line_enn, self.info_text]
-            for markers in self.creime_markers:
-                artists.extend([markers['start_line'], markers['end_line'], markers['fill']])
-            return artists
+            return [self.line_enz, self.line_ene, self.line_enn, self.info_text]
         
         with self.lock:
             times_copy = np.array(self.times)
@@ -298,8 +260,8 @@ class RealTimeVisualizer:
         min_len = min(len(times_copy), len(enz_copy), len(ene_copy), len(enn_copy))
         if min_len < 10:
             artists = [self.line_enz, self.line_ene, self.line_enn, self.info_text]
-            for markers in self.creime_markers:
-                artists.extend([markers['start_line'], markers['end_line'], markers['fill']])
+            for markers in self.processing_window_markers:
+                artists.extend([markers['line'], markers['fill']])
             return artists
         
         times_trim = times_copy[-min_len:]
@@ -326,7 +288,8 @@ class RealTimeVisualizer:
         self.ax2.set_ylim(ylim_ene)
         self.ax3.set_ylim(ylim_enn)
         
-        self.update_creime_markers(current_time_sec, rel_times)
+        # Actualizar marcadores de ventana de procesamiento
+        self.update_processing_markers(rel_times)
         
         current_time_str = datetime.now().strftime('%H:%M:%S')
         run_time = time.time() - self.start_time
@@ -346,10 +309,35 @@ class RealTimeVisualizer:
         self.info_text.set_text(info_text)
         
         artists = [self.line_enz, self.line_ene, self.line_enn, self.info_text]
-        for markers in self.creime_markers:
-            artists.extend([markers['start_line'], markers['end_line'], markers['fill']])
-        
+        for markers in self.processing_window_markers:
+            artists.extend([markers['line'], markers['fill']])
         return artists
+    
+    def update_processing_markers(self, rel_times):
+        """Actualiza marcadores de ventana de procesamiento CREIME_RT"""
+        if not self.processing_window_markers or len(rel_times) == 0:
+            return
+            
+        try:
+            # La ventana de procesamiento son los últimos 30 segundos
+            window_start = 30  # 30 segundos atrás
+            window_end = 0     # Tiempo actual
+            
+            for markers in self.processing_window_markers:
+                # Actualizar línea de ventana actual
+                markers['line'].set_xdata([window_end, window_end])
+                
+                # Actualizar área sombreada de ventana
+                try:
+                    markers['fill'].remove()
+                    ax = markers['line'].axes
+                    markers['fill'] = ax.axvspan(window_start, window_end, 
+                                                color=COLOR_GREEN, alpha=0.15)
+                except:
+                    pass
+                    
+        except Exception as e:
+            logging.debug(f"Error actualizando marcadores: {e}")
     
     def start_visualization(self):
         """Inicia visualización"""
@@ -361,7 +349,7 @@ class RealTimeVisualizer:
             self.animation = animation.FuncAnimation(
                 self.fig, self.update_plot, interval=150, blit=True, cache_frame_data=False
             )
-            logging.info("Visualizador iniciado con marcadores CREIME_RT (2s)")
+            logging.info("Visualizador del monitor iniciado")
         except Exception as e:
             logging.error(f"Error iniciando visualización: {e}")
             self.visualization_enabled = False
@@ -376,19 +364,14 @@ class RealTimeVisualizer:
         logging.info("Visualizador detenido")
 
 class UltraFastBuffer:
-    """
-    Buffer ultra-rápido para latencia mínima (2 segundos)
-    """
+    """Buffer ultra-rápido para monitor en tiempo real"""
     
-    def __init__(self, window_size=100, sampling_rate=100, update_interval=0.5):
-        # VENTANA MÍNIMA: 2 segundos (200 muestras)
+    def __init__(self, window_size=3000, sampling_rate=100, update_interval=0.1):
         self.window_size = int(window_size)
         self.sampling_rate = int(sampling_rate)
         self.update_interval = update_interval
-        self.update_samples = int(update_interval * sampling_rate)
         
-        # Buffer muy pequeño para máxima velocidad
-        total_size = self.window_size + (1 * self.update_samples)  # 400 muestras máximo
+        total_size = self.window_size + 500  # Buffer para 35 segundos
         self.buffers = {
             'ENZ': deque(maxlen=total_size),
             'ENE': deque(maxlen=total_size),
@@ -398,15 +381,10 @@ class UltraFastBuffer:
         self.lock = threading.Lock()
         self.window_count = 0
         self.last_window_time = 0
-        
-        # MODIFICACIÓN: Listo con solo 0.5 segundos de datos
         self.ready = False
-        self.min_ready_samples = int(0.5 * sampling_rate)  # 50 muestras mínimas
-        
-        # Evento para sincronización ultra-rápida
+        self.min_ready_samples = int(30 * sampling_rate)  # 30 segundos mínimos
         self.new_data_event = threading.Event()
         
-        # Estadísticas
         self.performance_stats = {
             'windows_generated': 0,
             'data_points_received': 0,
@@ -414,22 +392,20 @@ class UltraFastBuffer:
         }
     
     def add_data(self, component, data, timestamp):
-        """Añade datos y activa evento inmediatamente"""
+        """Añade datos del monitor en tiempo real"""
         with self.lock:
             if component in self.buffers:
                 self.buffers[component].extend(data)
                 self.performance_stats['data_points_received'] += len(data)
                 
-                # LISTO CON SOLO 0.5 SEGUNDOS DE DATOS
                 min_samples = min(len(buf) for buf in self.buffers.values())
                 self.ready = min_samples >= self.min_ready_samples
                 
-                # ACTIVAR EVENTO INMEDIATAMENTE
                 if data:
                     self.new_data_event.set()
     
     def wait_for_new_data(self, timeout=0.5):
-        """Espera ultra-rápida por nuevos datos"""
+        """Espera por nuevos datos"""
         return self.new_data_event.wait(timeout)
     
     def reset_data_event(self):
@@ -437,29 +413,34 @@ class UltraFastBuffer:
         self.new_data_event.clear()
     
     def get_latest_window(self):
-        """Genera ventana deslizante ultra-rápida"""
+        """Genera ventana deslizante"""
         with self.lock:
             current_time = time.time()
             
-            # Procesamiento más frecuente
             if current_time - self.last_window_time < self.update_interval:
                 return None
                 
             if not self.ready:
                 return None
             
-            # Extraer ventana actual (últimos 200 puntos)
             window_data = []
             for component in ['ENZ', 'ENE', 'ENN']:
-                component_data = list(self.buffers[component])
+                buf = self.buffers[component]
+                buf_len = len(buf)
                 
-                # RELLENAR RÁPIDAMENTE SI NO HAY SUFICIENTES DATOS
-                if len(component_data) < self.window_size:
-                    padding_needed = self.window_size - len(component_data)
-                    padding = [0.0] * padding_needed
-                    component_data = padding + component_data
+                if buf_len < self.window_size:
+                    padding_needed = self.window_size - buf_len
+                    component_data = [0.0] * padding_needed + list(buf)
                 else:
-                    component_data = component_data[-self.window_size:]
+                    start_idx = buf_len - self.window_size
+                    component_data = [buf[i] for i in range(start_idx, buf_len)]
+                
+                # Aplicar solo normalización z-score (datos ya vienen filtrados)
+                if len(component_data) > 1:
+                    mean_val = np.mean(component_data)
+                    std_val = np.std(component_data)
+                    if std_val > 0:
+                        component_data = [(x - mean_val) / std_val for x in component_data]
                 
                 window_data.append(component_data)
             
@@ -494,9 +475,9 @@ class UltraFastBuffer:
             return status
 
 class OptimizedHybridFilter:
-    """Filtro optimizado para bajo consumo"""
+    """Filtro optimizado según documentación CREIME_RT"""
     
-    def __init__(self, fs=100, hp_cutoff=0.09, lp_cutoff=45):
+    def __init__(self, fs=100, hp_cutoff=1.0, lp_cutoff=45):
         self.fs = fs
         nyquist = 0.5 * fs
         
@@ -531,14 +512,12 @@ class OptimizedHybridFilter:
         return filtered_lp.astype(np.float32).tolist()
 
 class UltraFastProcessingPipeline:
-    """
-    Pipeline de procesamiento ultra-rápido
-    """
+    """Pipeline de procesamiento para monitor"""
     
     def __init__(self, model_path, num_workers=1):
         self.model_path = model_path
         self.num_workers = num_workers
-        self.processing_queue = queue.Queue(maxsize=2)  # Cola muy pequeña
+        self.processing_queue = queue.Queue(maxsize=2)
         self.result_queue = queue.Queue()
         self.workers = []
         self.running = False
@@ -551,22 +530,22 @@ class UltraFastProcessingPipeline:
         for i in range(self.num_workers):
             worker = threading.Thread(
                 target=self.processing_worker,
-                name=f"CREIME_Worker_{i}",
+                name=f"CREIME_Monitor_Worker_{i}",
                 daemon=True
             )
             worker.start()
             self.workers.append(worker)
         
-        logging.info(f"Iniciados {self.num_workers} workers")
+        logging.info(f"Iniciados {self.num_workers} workers del monitor")
     
     def processing_worker(self):
-        """Worker ultra-rápido para CREIME_RT"""
+        """Worker para CREIME_RT en monitor"""
         try:
             from saipy.models.creime import CREIME_RT
             model = CREIME_RT(self.model_path)
-            logging.info("Worker de CREIME_RT inicializado")
+            logging.info("Worker monitor CREIME_RT inicializado")
         except Exception as e:
-            logging.error(f"Worker no pudo cargar modelo: {e}")
+            logging.error(f"Worker monitor no pudo cargar modelo: {e}")
             return
         
         while self.running:
@@ -578,9 +557,30 @@ class UltraFastProcessingPipeline:
                 
                 start_time = time.time()
                 
-                # Procesamiento directo
-                y_pred, predictions = model.predict(window_data)
-                result = predictions[0]
+                try:
+                    y_pred, predictions = model.predict(window_data)
+                    
+                    # Usar el valor máximo del vector completo (6000 muestras)
+                    if y_pred is not None and len(y_pred.shape) > 1:
+                        raw_output = float(np.max(y_pred[0]))  # Máximo del vector completo
+                    else:
+                        raw_output = -4.0
+                    
+                    if raw_output > -3.5:
+                        detection = 1
+                        magnitude = max(raw_output, 0.0) if raw_output > 0 else None
+                    else:
+                        detection = 0
+                        magnitude = None
+                    
+                    result = (detection, magnitude, raw_output)
+                    
+                except (IndexError, ValueError, TypeError) as e:
+                    logging.warning(f"Error en predicción monitor: {e}")
+                    result = (0, None, -4.0)
+                except Exception as e:
+                    logging.error(f"Error inesperado en monitor: {e}")
+                    result = (0, None, -4.0)
                 
                 processing_time = time.time() - start_time
                 
@@ -596,7 +596,7 @@ class UltraFastProcessingPipeline:
             except queue.Empty:
                 continue
             except Exception as e:
-                logging.error(f"Error en worker: {e}")
+                logging.error(f"Error en worker monitor: {e}")
                 try:
                     self.processing_queue.task_done()
                 except:
@@ -604,7 +604,7 @@ class UltraFastProcessingPipeline:
                 continue
     
     def submit_window(self, window_data, processing_id):
-        """Envía ventana para procesamiento inmediato"""
+        """Envía ventana para procesamiento"""
         try:
             self.processing_queue.put((window_data, processing_id), timeout=0.1)
             return True
@@ -612,7 +612,7 @@ class UltraFastProcessingPipeline:
             return False
     
     def get_result(self, timeout=0.5):
-        """Obtiene resultado rápidamente"""
+        """Obtiene resultado"""
         try:
             return self.result_queue.get(timeout=timeout)
         except queue.Empty:
@@ -630,9 +630,9 @@ class UltraFastProcessingPipeline:
         for worker in self.workers:
             worker.join(timeout=2.0)
 
-class TwoSecondLatencyDetector:
+class RealTimeMonitor:
     """
-    Sistema principal de detección con latencia MÍNIMA (2 segundos)
+    Monitor principal que usa datos en tiempo real de AnyShake
     """
     
     def __init__(self, model_path, host='localhost', port=30000, sampling_rate=100):
@@ -641,14 +641,16 @@ class TwoSecondLatencyDetector:
         self.port = port
         self.sampling_rate = sampling_rate
         
-        # CONFIGURACIÓN ULTRA-RÁPIDA - VENTANA MÍNIMA
-        self.window_size = 2 * sampling_rate  # 200 muestras - 2 SEGUNDOS
-        # PARÁMETROS OPTIMIZADOS PARA VELOCIDAD MÁXIMA
-        self.latency_target = 0.1  # 300 ms entre procesamientos
-        self.confidence_threshold = 0.95  # Menor umbral para mayor sensibilidad
-        self.consecutive_windows = 1  # Una sola detección
+        # Parámetros según documentación oficial CREIME_RT
+        self.window_size = 30 * sampling_rate  # 3000 muestras - 30 SEGUNDOS (oficial)
+        self.latency_target = 0.1  # Latencia objetivo
+        self.detection_threshold = -3.5  # Nuevo umbral de detección
+        self.noise_baseline = -4.0
+        self.high_noise_threshold = -1.80  # Umbral para ruido alto
+        self.magnitude_threshold = 1.0  # Ajustado según análisis (máximo 1.6)
+        self.consecutive_windows = 2  # 2 ventanas consecutivas para confirmación
         
-        # Componentes ultra-rápidos
+        # Componentes del sistema
         self.buffer = UltraFastBuffer(
             window_size=self.window_size,
             sampling_rate=sampling_rate,
@@ -657,13 +659,11 @@ class TwoSecondLatencyDetector:
         
         self.hybrid_filter = OptimizedHybridFilter(fs=sampling_rate)
         self.processing_pipeline = UltraFastProcessingPipeline(model_path, num_workers=1)
-        
-        # Visualizador
         self.visualizer = RealTimeVisualizer(self)
         
         # Estado del sistema
-        self.socket = None
         self.running = False
+        self.socket = None
         self.data_buffer = b''
         
         # Estadísticas
@@ -672,43 +672,68 @@ class TwoSecondLatencyDetector:
         self.packet_count = 0
         self.start_time = None
         self.processing_count = 0
-        
-        # Control de procesamiento
         self.last_processing_time = 0
-        self.detection_buffer = deque(maxlen=3)
+        self.detection_buffer = deque(maxlen=self.consecutive_windows)
+        
+        # Configuración de estación
+        self.station_id = "CREIME_RT_MONITOR"
+        
+        # Rastreo de eventos y timestamps
+        self.detected_events = []
+        self.monitor_start_time = None
+        
+        # Rastreo de tiempos de detección
+        self.first_detection_time = None  # Primer evento detectado
+        self.first_confirmation_time = None  # Primera confirmación de sismo
+        
+        # Rastreo de valores CREIME_RT para diagnóstico
+        self.creime_values = []
+        self.creime_timestamps = []  # Timestamps correspondientes
+        
+        # Buffer para MiniSEED (15 segundos antes del evento)
+        self.miniseed_buffer = {
+            'ENZ': deque(maxlen=1500),  # 15 segundos a 100Hz
+            'ENE': deque(maxlen=1500),
+            'ENN': deque(maxlen=1500)
+        }
+        self.miniseed_timestamps = deque(maxlen=1500)
         
         # Hilos
-        self.receiver_thread = None
+        self.data_thread = None
         self.processing_thread = None
         
-        logging.info("=== SISTEMA CONFIGURADO ===")
-        logging.info(f"VENTANA MÍNIMA: {self.window_size} muestras ({self.window_size/sampling_rate} segundos)")
-        logging.info(f"LATENCIA OBJETIVO: {self.latency_target} segundos")
-        logging.info(f"CONFIANZA: {self.confidence_threshold}")
+        logging.info("=== MONITOR CREIME_RT CONFIGURADO ===")
+        logging.info(f"HOST: {host}:{port}")
+        logging.info(f"VENTANA: {self.window_size} muestras ({self.window_size/sampling_rate} segundos)")
+        logging.info(f"UMBRAL DETECCIÓN: {self.detection_threshold}")
+        logging.info(f"UMBRAL RUIDO ALTO: {self.high_noise_threshold}")
+        logging.info(f"VENTANAS CONSECUTIVAS: {self.consecutive_windows}")
     
-    def connect_to_observer(self):
-        """Conexión rápida con AnyShake Observer"""
-        max_retries = 3
+    def connect_to_anyshake(self):
+        """Conexión con AnyShake Observer"""
+        max_retries = 5
         retry_delay = 5
         
         for attempt in range(max_retries):
             try:
                 self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                self.socket.settimeout(3.0)
+                self.socket.settimeout(10.0)
                 self.socket.connect((self.host, self.port))
-                logging.info(f" Conexión establecida: {self.host}:{self.port}")
+                logging.info(f"✅ Conexión establecida: {self.host}:{self.port}")
                 return True
                 
             except Exception as e:
                 logging.warning(f"Intento {attempt + 1}/{max_retries} falló: {e}")
+                if self.socket:
+                    self.socket.close()
                 if attempt < max_retries - 1:
                     time.sleep(retry_delay)
                 else:
-                    logging.error("No se pudo establecer conexión")
+                    logging.error("No se pudo establecer conexión con AnyShake")
                     return False
     
     def parse_observer_packet(self, packet):
-        """Parser optimizado para velocidad máxima"""
+        """Parser optimizado para paquetes AnyShake"""
         try:
             parts = packet.strip().split(',')
             
@@ -777,102 +802,237 @@ class TwoSecondLatencyDetector:
         return None
     
     def _calculate_confidence(self, result_data):
-        """Calcula confianza ultra-rápida"""
-        if result_data['result'][0] == 1:
-            return 0.75  # Confianza fija para velocidad
-        return 0.0
+        """Interpreta salida cruda de CREIME_RT"""
+        try:
+            if len(result_data['result']) >= 3:
+                raw_output = float(result_data['result'][2])
+            else:
+                raw_output = self.noise_baseline
+            
+            # Mostrar timestamp actual en tiempo real
+            current_time = datetime.now()
+            logging.info(f"[{current_time}] CREIME_RT Raw Output: {raw_output:.2f}")
+            
+            return raw_output
+            
+        except (IndexError, TypeError, ValueError) as e:
+            logging.warning(f"Error extrayendo salida CREIME_RT: {e}")
+            current_time = datetime.now()
+            logging.info(f"[{current_time}] CREIME_RT Raw Output: {self.noise_baseline:.2f} (error)")
+            return self.noise_baseline
     
     def evaluate_detection(self, result):
-        """Evaluación ultra-rápida de detección"""
-        if result and result['detection'] == 1:
-            if result['confidence'] >= self.confidence_threshold:
+        """Evaluación según documentación oficial CREIME_RT"""
+        if result:
+            if result['confidence'] > self.detection_threshold:
                 self.detection_buffer.append(True)
-                
-                if len(self.detection_buffer) >= self.consecutive_windows:
-                    return True
+                logging.debug(f"Ventana detectada como evento: {result['confidence']:.2f} > {self.detection_threshold}")
             else:
                 self.detection_buffer.append(False)
+                logging.debug(f"Ventana detectada como ruido: {result['confidence']:.2f} <= {self.detection_threshold}")
+            
+            if len(self.detection_buffer) >= self.consecutive_windows:
+                recent_detections = list(self.detection_buffer)[-self.consecutive_windows:]
+                consecutive_count = sum(recent_detections)
+                
+                if consecutive_count >= self.consecutive_windows:
+                    logging.info(f"TRIGGER: {consecutive_count}/{self.consecutive_windows} ventanas consecutivas detectadas")
+                    return {
+                        'type': 'event_confirmed',
+                        'consecutive_detections': consecutive_count,
+                        'is_seismic': True  # Confirmación automática con 2 ventanas consecutivas
+                    }
         else:
             self.detection_buffer.append(False)
         
         return False
     
-    def trigger_alert(self, detection_result):
-        """Activa alerta sísmica ULTRA-RÁPIDA"""
-        # UMBRAL MUY BAJO PARA PRUEBAS - AJUSTAR SEGÚN NECESIDAD
-        if detection_result['magnitude'] is None or detection_result['magnitude'] < 0.6:
-            logging.info(f"Evento descartado - Magnitud: {detection_result['magnitude']}")
-            return
-        
+    def _apply_magnitude_correction(self, raw_output):
+        """Aplica corrección de magnitud según reglas especificadas"""
+        if raw_output < 0.0:
+            return 4.2
+        elif 0.0 <= raw_output < 1.3:
+            return raw_output + 4.3
+        elif 1.3 <= raw_output < 3.2:
+            return raw_output + 3.9
+        elif 3.2 <= raw_output < 3.9:
+            return raw_output + 3.7
+        elif raw_output >= 3.9:
+            return raw_output + 3.6
+        else:
+            return raw_output
+    
+    def _is_seismic_event(self, result):
+        """Determina si es evento sísmico significativo"""
+        return (result['confidence'] > 0.0 and 
+                result['magnitude'] is not None and 
+                result['magnitude'] >= self.magnitude_threshold)
+    
+    def trigger_alert(self, detection_result, detection_info):
+        """Activa alerta según protocolo oficial CREIME_RT"""
         self.detection_count += 1
         self.last_detection_time = detection_result['timestamp']
         
-        alert_message = (
-            f"🚨 ALERTA: SISMO CONFIRMADO 🚨 - "
-            f"Confianza: {detection_result['confidence']:.3f} | "
-            f"Magnitud: {detection_result['magnitude']:.1f} | "
-            f"Ventana: {detection_result['processing_id']}"
-            f"Latencia: {detection_result['processing_time']:.3f}s | "
-        )
+        # Calcular tiempo real del evento
+        event_time = detection_result['timestamp']
         
-        logging.critical(alert_message)
-        self.save_event_data(detection_result)
+        # Registrar primera detección
+        if self.first_detection_time is None:
+            self.first_detection_time = event_time
+        
+        if detection_info['is_seismic']:
+            # Registrar primera confirmación de sismo
+            if self.first_confirmation_time is None:
+                self.first_confirmation_time = event_time
+            
+            # Aplicar corrección de magnitud para sismos confirmados
+            raw_confidence = detection_result['confidence']
+            corrected_magnitude = self._apply_magnitude_correction(raw_confidence)
+            
+            alert_message = (
+                f"🚨 MONITOR: SISMO CONFIRMADO 🚨\n"
+                f"Salida CREIME_RT: {detection_result['confidence']:.2f}\n"
+                f"Magnitud: {corrected_magnitude:.1f}\n"
+                f"Ventanas consecutivas: {detection_info['consecutive_detections']}/{self.consecutive_windows}\n"
+                f"Ventana: {detection_result['processing_id']}\n"
+                f"Latencia: {detection_result['processing_time']:.3f}s"
+            )
+            logging.critical(alert_message)
+            
+            # Registrar evento detectado con magnitud corregida
+            self.detected_events.append({
+                'type': 'seismic',
+                'event_time': event_time,
+                'confidence': detection_result['confidence'],
+                'magnitude': detection_result['magnitude'],
+                'corrected_magnitude': corrected_magnitude,
+                'processing_id': detection_result['processing_id']
+            })
+            
+            self.save_event_data(detection_result, corrected_magnitude)
+        else:
+            mag_display = f"{detection_result['magnitude']:.1f}" if detection_result['magnitude'] is not None else "N/A"
+            alert_message = (
+                f"⚠️ MONITOR: EVENTO DETECTADO ⚠️\n"
+                f"Salida CREIME_RT: {detection_result['confidence']:.2f}\n"
+                f"Magnitud: {mag_display}\n"
+                f"Ventanas consecutivas: {detection_info['consecutive_detections']}/{self.consecutive_windows}\n"
+                f"Ventana: {detection_result['processing_id']}\n"
+                f"Latencia: {detection_result['processing_time']:.3f}s"
+            )
+            logging.warning(alert_message)
+            
+            # Registrar evento detectado
+            self.detected_events.append({
+                'type': 'event',
+                'event_time': event_time,
+                'confidence': detection_result['confidence'],
+                'magnitude': detection_result['magnitude'],
+                'processing_id': detection_result['processing_id']
+            })
     
-    def save_event_data(self, detection_result):
-        """Guarda datos del evento rápidamente"""
+    def save_event_data(self, detection_result, corrected_magnitude):
+        """Guarda datos del evento detectado en monitor"""
         try:
-            events_dir = "events"
+            events_dir = "events_monitor"
             if not os.path.exists(events_dir):
                 os.makedirs(events_dir)
-                
-            filename = os.path.join(events_dir, f"event_ULTRAFAST_{detection_result['timestamp'].strftime('%Y%m%d_%H%M%S')}.npz")
-            np.savez_compressed(
-                filename,
-                timestamp=detection_result['timestamp'],
-                magnitude=detection_result['magnitude'],
-                confidence=detection_result['confidence'],
-                processing_time=detection_result['processing_time'],
-                processing_id=detection_result['processing_id'],
-                waveform_data=detection_result['window_data'],
-                detection_count=self.detection_count
-            )
-            logging.info(f"Evento ULTRA-RÁPIDO guardado: {filename}")
+            
+            event_id = str(uuid.uuid4())[:8]
+            timestamp_str = detection_result['timestamp'].strftime('%Y%m%d_%H%M%S')
+            
+            # 1. Guardar JSON inmediatamente
+            json_data = {
+                "station_id": self.station_id,
+                "event_id": event_id,
+                "timestamp": detection_result['timestamp'].isoformat(),
+                "confidence": detection_result['confidence'],
+                "magnitude": detection_result['magnitude'],
+                "corrected_magnitude": corrected_magnitude
+            }
+            
+            json_filename = os.path.join(events_dir, f"monitor_event_{timestamp_str}.json")
+            with open(json_filename, 'w') as f:
+                json.dump(json_data, f, indent=2)
+            logging.info(f"Evento monitor guardado: {json_filename}")
+            
+            # 2. Programar MiniSEED para 60 segundos después
+            miniseed_timer = threading.Timer(60.0, self._save_miniseed, 
+                                           args=[event_id, timestamp_str, detection_result['timestamp']])
+            miniseed_timer.daemon = True
+            miniseed_timer.start()
+            logging.info(f"MiniSEED programado para 60s: monitor_event_{timestamp_str}.mseed")
+            
         except Exception as e:
-            logging.error(f"Error guardando evento: {e}")
+            logging.error(f"Error guardando evento monitor: {e}")
+    
+    def _save_miniseed(self, event_id, timestamp_str, event_time):
+        """Guarda archivo MiniSEED con 1 minuto de datos (15s antes del evento)"""
+        try:
+            events_dir = "events_monitor"
+            
+            # Crear stream ObsPy
+            stream = Stream()
+            
+            # Obtener datos de los últimos 60 segundos (6000 muestras)
+            for i, component in enumerate(['ENZ', 'ENE', 'ENN']):
+                channel_code = ['HHZ', 'HHE', 'HHN'][i]
+                
+                # Extraer últimas 6000 muestras (60 segundos)
+                buffer_data = list(self.miniseed_buffer[component])[-6000:] if len(self.miniseed_buffer[component]) >= 6000 else list(self.miniseed_buffer[component])
+                
+                if len(buffer_data) < 6000:
+                    # Rellenar con ceros si no hay suficientes datos
+                    buffer_data = [0.0] * (6000 - len(buffer_data)) + buffer_data
+                
+                # Crear trace
+                stats = Stats()
+                stats.network = "SK"
+                stats.station = "MONITOR"
+                stats.location = "00"
+                stats.channel = channel_code
+                stats.sampling_rate = 100.0
+                stats.starttime = UTCDateTime(event_time) - 15  # 15 segundos antes del evento
+                
+                trace = Trace(data=np.array(buffer_data, dtype=np.float32), header=stats)
+                stream.append(trace)
+            
+            # Guardar MiniSEED
+            mseed_filename = os.path.join(events_dir, f"monitor_event_{timestamp_str}.mseed")
+            stream.write(mseed_filename, format='MSEED')
+            logging.info(f"MiniSEED guardado: {mseed_filename}")
+            
+        except Exception as e:
+            logging.error(f"Error guardando MiniSEED: {e}")
     
     def processing_loop(self):
-        """Bucle de procesamiento ULTRA-RÁPIDO"""
+        """Bucle de procesamiento"""
         self.last_processing_time = time.time()
         
         while self.running:
             try:
-                # ESPERA ACTIVA ULTRA-RÁPIDA
                 if self.buffer.wait_for_new_data(timeout=0.3):
                     self.buffer.reset_data_event()
                     
                     result = self.ultra_fast_processing()
                     
                     if result:
-                        status = " ANOMALÍA_DETECTADA" if result['detection'] == 1 else " NO_DETECTADO"
-                        mag_display = f"{result['magnitude']:.1f}" if result['magnitude'] is not None else "N/A"
+                        # Capturar valor y timestamp para estadísticas
+                        self.creime_values.append(result['confidence'])
+                        self.creime_timestamps.append(result['timestamp'])
                         
-                        logging.info(
-                            f"Procesado {result['processing_id']}: {status} | "
-                            f"Mag: {mag_display} | Conf: {result['confidence']:.3f} | "
-                            f"Tiempo: {result['processing_time']:.3f}s"
-                        )
-                        
-                        if self.evaluate_detection(result):
-                            self.trigger_alert(result)
+                        detection_info = self.evaluate_detection(result)
+                        if detection_info:
+                            self.trigger_alert(result, detection_info)
                 
-                time.sleep(0.05)  # Sleep mínimo para reducir CPU
+                time.sleep(0.05)
                 
             except Exception as e:
-                logging.error(f"Error en bucle ULTRA-RÁPIDO: {e}")
+                logging.error(f"Error en bucle procesamiento monitor: {e}")
                 time.sleep(0.1)
     
     def receive_data_loop(self):
-        """Bucle de recepción ULTRA-RÁPIDO"""
+        """Bucle de recepción de datos AnyShake"""
         self.running = True
         self.data_buffer = b''
         
@@ -881,7 +1041,7 @@ class TwoSecondLatencyDetector:
                 data = self.socket.recv(4096)
                 if not data:
                     logging.warning("Conexión cerrada - Reconectando...")
-                    if not self.connect_to_observer():
+                    if not self.connect_to_anyshake():
                         time.sleep(3)
                         continue
                     else:
@@ -905,6 +1065,12 @@ class TwoSecondLatencyDetector:
                                     current_time
                                 )
                                 
+                                # Actualizar buffer MiniSEED
+                                if parsed_data['component'] in self.miniseed_buffer:
+                                    self.miniseed_buffer[parsed_data['component']].extend(parsed_data['data'])
+                                    for _ in parsed_data['data']:
+                                        self.miniseed_timestamps.append(current_time)
+                                
                                 self.visualizer.update_data(
                                     parsed_data['component'],
                                     parsed_data['data'],
@@ -925,35 +1091,116 @@ class TwoSecondLatencyDetector:
                 else:
                     break
     
-    def start_system(self):
-        """Inicia el sistema ULTRA-RÁPIDO"""
+    def plot_creime_output_timeline(self):
+        """Genera gráfico de raw output CREIME_RT vs tiempo"""
+        if not self.creime_values or not VISUALIZATION_ENABLED:
+            return
+            
         try:
-            os.nice(10)
-        except:
-            pass
-        
-        if not self.connect_to_observer():
+            import matplotlib.pyplot as plt
+            import matplotlib.dates as mdates
+            from datetime import datetime
+            
+            # Convertir timestamps a datetime
+            if self.creime_timestamps:
+                times = [ts if isinstance(ts, datetime) else datetime.fromisoformat(str(ts).replace('Z', '+00:00')) 
+                        for ts in self.creime_timestamps]
+            else:
+                times = list(range(len(self.creime_values)))
+            
+            # Crear gráfico
+            fig, ax = plt.subplots(figsize=(16, 8))
+            
+            # Plotear raw output
+            ax.plot(times, self.creime_values, 'b-', linewidth=1.0, alpha=0.8, label='CREIME_RT Raw Output')
+            
+            # Líneas de umbrales
+            ax.axhline(y=self.detection_threshold, color='red', linestyle='--', linewidth=2, 
+                      label=f'Umbral Detección ({self.detection_threshold})')
+            ax.axhline(y=self.noise_baseline, color='gray', linestyle='--', linewidth=1, 
+                      label=f'Línea Base Ruido ({self.noise_baseline})')
+            ax.axhline(y=0, color='green', linestyle='--', linewidth=1, 
+                      label='Cero (Magnitud Positiva)')
+            ax.axhline(y=self.magnitude_threshold, color='orange', linestyle='--', linewidth=1, 
+                      label=f'Umbral Magnitud ({self.magnitude_threshold})')
+            
+            # Configuración del gráfico
+            ax.set_xlabel('Tiempo', fontsize=12)
+            ax.set_ylabel('CREIME_RT Raw Output', fontsize=12)
+            ax.set_title('Evolución Temporal CREIME_RT - Monitor en Tiempo Real', fontsize=14, fontweight='bold')
+            ax.grid(True, alpha=0.3)
+            ax.legend()
+            
+            # Formatear eje X si son timestamps reales
+            if self.creime_timestamps and isinstance(self.creime_timestamps[0], datetime):
+                ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
+                ax.xaxis.set_major_locator(mdates.SecondLocator(interval=30))
+                plt.setp(ax.xaxis.get_majorticklabels(), rotation=45)
+            
+            # Estadísticas en el gráfico
+            stats_text = (
+                f'Valores: {len(self.creime_values)}\n'
+                f'Mínimo: {min(self.creime_values):.3f}\n'
+                f'Máximo: {max(self.creime_values):.3f}\n'
+                f'Promedio: {sum(self.creime_values)/len(self.creime_values):.3f}\n'
+                f'Detecciones: {sum(1 for v in self.creime_values if v > self.detection_threshold)}'
+            )
+            
+            ax.text(0.02, 0.98, stats_text, transform=ax.transAxes, 
+                   verticalalignment='top', fontsize=10,
+                   bbox=dict(boxstyle='round', facecolor='white', alpha=0.9))
+            
+            plt.tight_layout()
+            plt.show()
+            
+            logging.info("Gráfico de raw output generado")
+            
+        except Exception as e:
+            logging.error(f"Error generando gráfico: {e}")
+    
+    def start_monitor(self):
+        """Inicia el monitor completo"""
+        if not self.connect_to_anyshake():
             return False
         
         self.start_time = time.time()
+        self.monitor_start_time = datetime.now()
         
-        logging.info("INICIANDO SISTEMA")
-        logging.info(f" Ventana: {self.window_size} muestras")
-        logging.info(f" Latencia: {self.latency_target}s")
-        logging.info(f" Confianza: {self.confidence_threshold}")
+        logging.info("INICIANDO MONITOR CREIME_RT")
+        logging.info(f" Host: {self.host}:{self.port}")
+        logging.info(f" Umbral Detección: {self.detection_threshold}")
+        logging.info(f" Ventanas Consecutivas: {self.consecutive_windows}")
+        logging.info(f" Tiempo inicio: {self.monitor_start_time}")
         
-        # Hilo de recepción
-        self.receiver_thread = threading.Thread(
+        self.running = True
+        
+        # Hilo de recepción de datos
+        self.data_thread = threading.Thread(
             target=self.receive_data_loop,
-            name="UltraFastReceiver",
+            name="AnyShakeReceiver",
             daemon=True
         )
-        self.receiver_thread.start()
+        self.data_thread.start()
+        
+        # Esperar a que el modelo CREIME_RT se cargue antes de iniciar visualizador
+        logging.info("Esperando carga del modelo CREIME_RT...")
+        model_loaded = False
+        start_wait = time.time()
+        while not model_loaded and (time.time() - start_wait < 30):
+            time.sleep(0.5)
+            # Verificar si hay workers activos (modelo cargado)
+            if hasattr(self.processing_pipeline, 'workers') and len(self.processing_pipeline.workers) > 0:
+                model_loaded = True
+        
+        if model_loaded:
+            logging.info("Modelo CREIME_RT cargado - Iniciando visualizador")
+        else:
+            logging.warning("Timeout esperando modelo - Iniciando visualizador de todos modos")
         
         # Hilo de procesamiento
         self.processing_thread = threading.Thread(
             target=self.processing_loop,
-            name="UltraFastProcessor", 
+            name="MonitorProcessor", 
             daemon=True
         )
         self.processing_thread.start()
@@ -961,28 +1208,28 @@ class TwoSecondLatencyDetector:
         # Iniciar visualizador
         self.visualizer.start_visualization()
         
-        # INICIALIZACIÓN ULTRA-RÁPIDA - SOLO 0.5 SEGUNDOS DE ESPERA
+        # Esperar inicialización
         buffer_ready = False
         startup_time = time.time()
         while not buffer_ready and self.running and (time.time() - startup_time < 10):
             time.sleep(0.1)
             status = self.buffer.get_buffer_status()
             current_samples = status['ENZ']['samples']
-            buffer_ready = current_samples >= 50  # 0.5 segundos
+            buffer_ready = current_samples >= 50
             
             if not buffer_ready and (time.time() - startup_time > 1):
                 elapsed = time.time() - startup_time
-                logging.info(f"Inicializando buffer: {current_samples}/200 muestras ({elapsed:.1f}s)")
+                logging.info(f"Inicializando buffer monitor: {current_samples}/3000 muestras ({elapsed:.1f}s)")
         
         if buffer_ready:
-            logging.info("SISTEMA OPERATIVO - Detección activa en 2 SEGUNDOS")
+            logging.info("MONITOR OPERATIVO - Procesando datos en tiempo real")
         else:
-            logging.warning(" Sistema operativo con buffer parcial")
+            logging.warning("Monitor operativo con buffer parcial")
         
         return True
     
-    def stop_system(self):
-        """Detiene el sistema"""
+    def stop_monitor(self):
+        """Detiene el monitor"""
         self.running = False
         
         self.processing_pipeline.stop_workers()
@@ -995,77 +1242,118 @@ class TwoSecondLatencyDetector:
             run_time = time.time() - self.start_time
             processing_rate = self.processing_count / run_time if run_time > 0 else 0
             
-            logging.info(
-                f"\n=== REPORTE FINAL ==="
-                f"Tiempo total: {run_time:.1f}s"
-                f"Paquetes: {self.packet_count}"
-                f"Procesamientos: {self.processing_count}"
-                f"Tasa: {processing_rate:.2f} ventanas/segundo"
-                f"Detecciones: {self.detection_count}"
-                f"Última detección: {self.last_detection_time}"
-            )
+            logging.info(f"\n{'='*60}")
+            logging.info(f"REPORTE FINAL - MONITOR CREIME_RT")
+            logging.info(f"{'='*60}")
+            logging.info(f"Monitor en Tiempo Real:")
+            logging.info(f"  Inicio: {self.monitor_start_time}")
+            logging.info(f"  Duración: {run_time:.1f} segundos")
+            logging.info(f"")
+            logging.info(f"Rendimiento del Sistema:")
+            logging.info(f"  Paquetes procesados: {self.packet_count}")
+            logging.info(f"  Ventanas CREIME_RT: {self.processing_count}")
+            logging.info(f"  Tasa procesamiento: {processing_rate:.2f} ventanas/segundo")
+            logging.info(f"")
+            
+            # Tiempos de detección
+            if self.first_detection_time:
+                logging.info(f"Primera Detección: {self.first_detection_time}")
+            if self.first_confirmation_time:
+                logging.info(f"Primera Confirmación: {self.first_confirmation_time}")
+            
+            logging.info(f"Eventos Detectados: {len(self.detected_events)}")
+            
+            # Estadísticas de valores CREIME_RT para diagnóstico
+            if hasattr(self, 'creime_values') and self.creime_values:
+                min_val = min(self.creime_values)
+                max_val = max(self.creime_values)
+                mean_val = sum(self.creime_values) / len(self.creime_values)
+                above_threshold = sum(1 for v in self.creime_values if v > self.detection_threshold)
+                logging.info(f"")
+                logging.info(f"Estadísticas CREIME_RT:")
+                logging.info(f"  Valores mínimo/máximo: {min_val:.2f} / {max_val:.2f}")
+                logging.info(f"  Valor promedio: {mean_val:.2f}")
+                logging.info(f"  Ventanas > umbral ({self.detection_threshold}): {above_threshold}/{len(self.creime_values)}")
+                logging.info(f"  Porcentaje activación: {(above_threshold/len(self.creime_values)*100):.2f}%")
+            
+            if self.detected_events:
+                # Calcular magnitud máxima
+                max_magnitude = 0.0
+                for event in self.detected_events:
+                    if event['type'] == 'seismic' and 'corrected_magnitude' in event:
+                        max_magnitude = max(max_magnitude, event['corrected_magnitude'])
+                
+                logging.info(f"Magnitud Final (Máxima): {max_magnitude:.1f}")
+                logging.info(f"")
+                logging.info(f"Detalle de Eventos:")
+                for i, event in enumerate(self.detected_events, 1):
+                    event_type = "SÍSMICO" if event['type'] == 'seismic' else "EVENTO"
+                    logging.info(f"  {i}. {event_type}:")
+                    logging.info(f"     Tiempo: {event['event_time']}")
+                    logging.info(f"     Confianza: {event['confidence']:.2f}")
+                    if 'corrected_magnitude' in event:
+                        logging.info(f"     Magnitud: {event['corrected_magnitude']:.1f}")
+                    else:
+                        logging.info(f"     Magnitud: {event['magnitude']:.1f if event['magnitude'] else 'N/A'}")
+                    logging.info(f"     Ventana: {event['processing_id']}")
+            else:
+                logging.info(f"  No se detectaron eventos sísmicos")
+            
+            logging.info(f"{'='*60}")
+            
+            # Generar gráfico de raw output
+            self.plot_creime_output_timeline()
 
 def main():
-    """Función principal ULTRA-RÁPIDA"""
-    MODEL_PATH = "../saipy/saved_models/"
-    OBSERVER_HOST = "localhost"
-    OBSERVER_PORT = 30000
+    """Función principal del monitor"""
+    import argparse
     
-    max_restarts = 2
-    restart_delay = 5
-    restart_count = 0
+    parser = argparse.ArgumentParser(description='Monitor CREIME_RT en tiempo real con AnyShake')
+    parser.add_argument('--model_path', default='../saipy/saved_models/', help='Ruta del modelo CREIME_RT')
+    parser.add_argument('--host', default='localhost', help='Host de AnyShake Observer')
+    parser.add_argument('--port', type=int, default=30000, help='Puerto de AnyShake Observer')
     
-    for directory in ["logs", "events", "backups"]:
+    args = parser.parse_args()
+    
+    # Crear directorios
+    for directory in ["logs", "events_monitor"]:
         if not os.path.exists(directory):
             os.makedirs(directory)
     
-    while restart_count < max_restarts:
-        detector = TwoSecondLatencyDetector(
-            model_path=MODEL_PATH,
-            host=OBSERVER_HOST,
-            port=OBSERVER_PORT
-        )
-        
-        try:
-            logging.info(f"Iniciando sistema (intento {restart_count + 1}/{max_restarts})")
-            
-            if detector.start_system():
-                if VISUALIZATION_ENABLED:
-                    plt.show()
-                else:
-                    while detector.running:
-                        time.sleep(5)
-            else:
-                logging.error("Fallo en inicio del sistema")
-                restart_count += 1
-                
-        except KeyboardInterrupt:
-            logging.info("Sistema detenido por usuario")
-            break
-        except Exception as e:
-            logging.error(f"Error crítico: {e}")
-            restart_count += 1
-            
-            if restart_count < max_restarts:
-                logging.info(f"Reiniciando en {restart_delay} segundos...")
-                time.sleep(restart_delay)
-            else:
-                logging.error("Máximos reinicios alcanzados")
-                break
-        finally:
-            detector.stop_system()
-
-if __name__ == "__main__":
-    if hasattr(os, 'uname') and 'aarch64' in os.uname().machine:
-        logging.info("Ejecutando en Jetson Orin Nano")
-    else:
-        logging.warning("Plataforma no optimizada - rendimiento puede variar")
-    
+    # Verificar SAIPy
     try:
         import saipy
-        logging.info("SAIPy disponible")
+        logging.info("SAIPy disponible para monitor")
     except ImportError:
         logging.error("SAIPy no disponible")
         sys.exit(1)
     
+    # Crear monitor
+    monitor = RealTimeMonitor(
+        model_path=args.model_path,
+        host=args.host,
+        port=args.port
+    )
+    
+    try:
+        logging.info(f"Iniciando monitor CREIME_RT en tiempo real")
+        
+        if monitor.start_monitor():
+            if VISUALIZATION_ENABLED:
+                plt.show()
+            else:
+                while monitor.running:
+                    time.sleep(5)
+        else:
+            logging.error("Fallo en inicio del monitor")
+            
+    except KeyboardInterrupt:
+        logging.info("Monitor detenido por usuario")
+    except Exception as e:
+        logging.error(f"Error crítico en monitor: {e}")
+    finally:
+        monitor.stop_monitor()
+
+if __name__ == "__main__":
+    logging.info("Ejecutando Monitor CREIME_RT en Tiempo Real")
     main()
