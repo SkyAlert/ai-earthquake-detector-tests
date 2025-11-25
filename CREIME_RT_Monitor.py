@@ -20,7 +20,7 @@ import json
 import sys
 import uuid
 from obspy import Stream, Trace, UTCDateTime
-from obspy.core import Stats
+from obspy.core.stats import Stats
 
 # ===== CONFIGURACIÓN GPU SEGURA PARA JETSON ORIN NANO =====
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
@@ -359,25 +359,25 @@ class RealTimeVisualizer:
         logging.info("Visualizador detenido")
 
 class UltraFastBuffer:
-    """Buffer ultra-rápido para monitor en tiempo real"""
+    """Buffer de latencia mínima - ventana deslizante continua"""
     
-    def __init__(self, window_size=3000, sampling_rate=100, update_interval=0.1):
+    def __init__(self, window_size=3000, sampling_rate=100, update_interval=1.0):
         self.window_size = int(window_size)
         self.sampling_rate = int(sampling_rate)
-        self.update_interval = update_interval
+        self.update_interval = update_interval  # 1000ms sincronizado con AnyShake
         
-        total_size = self.window_size + 500  # Buffer para 35 segundos
+        # Buffer circular exacto para ventana de 30s
         self.buffers = {
-            'ENZ': deque(maxlen=total_size),
-            'ENE': deque(maxlen=total_size),
-            'ENN': deque(maxlen=total_size)
+            'ENZ': deque(maxlen=self.window_size),
+            'ENE': deque(maxlen=self.window_size),
+            'ENN': deque(maxlen=self.window_size)
         }
         
         self.lock = threading.Lock()
         self.window_count = 0
         self.last_window_time = 0
         self.ready = False
-        self.min_ready_samples = int(30 * sampling_rate)  # 30 segundos mínimos
+        self.min_ready_samples = self.window_size  # Requiere ventana completa
         self.new_data_event = threading.Event()
         
         self.performance_stats = {
@@ -408,10 +408,11 @@ class UltraFastBuffer:
         self.new_data_event.clear()
     
     def get_latest_window(self):
-        """Genera ventana deslizante"""
+        """Ventana deslizante de latencia mínima - siempre los últimos 30s"""
         with self.lock:
             current_time = time.time()
             
+            # Procesar cada 10ms para latencia mínima
             if current_time - self.last_window_time < self.update_interval:
                 return None
                 
@@ -421,17 +422,14 @@ class UltraFastBuffer:
             window_data = []
             for component in ['ENZ', 'ENE', 'ENN']:
                 buf = self.buffers[component]
-                buf_len = len(buf)
                 
-                if buf_len < self.window_size:
-                    padding_needed = self.window_size - buf_len
-                    component_data = [0.0] * padding_needed + list(buf)
+                # Usar directamente el buffer circular (siempre los últimos 30s)
+                if len(buf) == self.window_size:
+                    component_data = list(buf)  # Los últimos 3000 datos
                 else:
-                    start_idx = buf_len - self.window_size
-                    component_data = [buf[i] for i in range(start_idx, buf_len)]
-                
-                # Datos ya procesados con Z-Score y filtrados
-                # No aplicar normalización adicional
+                    # Rellenar solo si no tenemos ventana completa aún
+                    padding_needed = self.window_size - len(buf)
+                    component_data = [0.0] * padding_needed + list(buf)
                 
                 window_data.append(component_data)
             
@@ -644,9 +642,9 @@ class RealTimeMonitor:
         self.port = port
         self.sampling_rate = sampling_rate
         
-        # Parámetros originales CREIME_RT
+        # Parámetros sincronizados con AnyShake (datos cada 1000ms)
         self.window_size = 30 * sampling_rate  # 3000 muestras - 30 SEGUNDOS
-        self.latency_target = 0.1  # Latencia objetivo
+        self.latency_target = 1.0  # 1000ms - perfectamente sincronizado
         self.detection_threshold = -0.5  # Umbral original CREIME_RT
         self.noise_baseline = -4.0
         self.high_noise_threshold = -1.80
@@ -657,7 +655,7 @@ class RealTimeMonitor:
         self.buffer = UltraFastBuffer(
             window_size=self.window_size,
             sampling_rate=sampling_rate,
-            update_interval=self.latency_target
+            update_interval=self.latency_target  # 10ms para latencia mínima
         )
         
         self.hybrid_filter = OptimizedHybridFilter(fs=sampling_rate)
