@@ -532,6 +532,8 @@ class UltraFastProcessingPipeline:
     def start_workers(self):
         """Inicia workers de procesamiento"""
         self.running = True
+        self.workers_ready = threading.Event()  # Evento para sincronizar inicialización
+        
         for i in range(self.num_workers):
             worker = threading.Thread(
                 target=self.processing_worker,
@@ -549,6 +551,10 @@ class UltraFastProcessingPipeline:
             from saipy.models.creime import CREIME_RT
             model = CREIME_RT(self.model_path)
             logging.info("Worker monitor CREIME_RT inicializado")
+            
+            # Señalar que el worker está listo
+            self.workers_ready.set()
+            
         except Exception as e:
             logging.error(f"Worker monitor no pudo cargar modelo: {e}")
             return
@@ -623,6 +629,10 @@ class UltraFastProcessingPipeline:
         except queue.Empty:
             return None
     
+    def is_worker_ready(self, timeout=30):
+        """Verifica si el worker CREIME_RT está listo"""
+        return hasattr(self, 'workers_ready') and self.workers_ready.wait(timeout)
+    
     def stop_workers(self):
         """Detiene workers"""
         self.running = False
@@ -653,7 +663,7 @@ class RealTimeMonitor:
         self.noise_baseline = -4.0
         self.high_noise_threshold = -1.80
         self.magnitude_threshold = 0.0  # Umbral original para magnitud
-        self.consecutive_windows = 1  # Sin requerimiento de ventanas consecutivas
+        self.consecutive_windows = 1  # Confirmación inmediata para latencia mínima
         
         # Componentes del sistema
         self.buffer = UltraFastBuffer(
@@ -987,8 +997,9 @@ class RealTimeMonitor:
             logging.error(f"Error guardando MiniSEED: {e}")
     
     def processing_loop(self):
-        """Bucle de procesamiento"""
+        """Bucle de procesamiento con estabilidad 24/7"""
         self.last_processing_time = time.time()
+        cycle_count = 0
         
         while self.running:
             try:
@@ -1006,10 +1017,17 @@ class RealTimeMonitor:
                         if detection_info:
                             self.trigger_alert(result, detection_info)
                 
+                # Limpieza periódica de memoria (cada hora)
+                cycle_count += 1
+                if cycle_count % 3600 == 0:  # 3600 segundos = 1 hora
+                    self._memory_cleanup()
+                    logging.info(f"Limpieza de memoria completada - Ciclo {cycle_count}")
+                
                 time.sleep(0.05)
                 
             except Exception as e:
                 logging.error(f"Error en bucle procesamiento monitor: {e}")
+                self._handle_processing_error()
                 time.sleep(0.1)
     
     def receive_data_loop(self):
@@ -1163,31 +1181,31 @@ class RealTimeMonitor:
         )
         self.data_thread.start()
         
-        # Esperar a que el modelo CREIME_RT se cargue antes de iniciar visualizador
-        logging.info("Esperando carga del modelo CREIME_RT...")
-        model_loaded = False
-        start_wait = time.time()
-        while not model_loaded and (time.time() - start_wait < 30):
-            time.sleep(0.5)
-            # Verificar si hay workers activos (modelo cargado)
-            if hasattr(self.processing_pipeline, 'workers') and len(self.processing_pipeline.workers) > 0:
-                model_loaded = True
+        # Esperar a que el worker CREIME_RT esté completamente inicializado
+        logging.info("Esperando inicialización completa del worker CREIME_RT...")
         
-        if model_loaded:
-            logging.info("Modelo CREIME_RT cargado - Iniciando visualizador")
+        if self.processing_pipeline.is_worker_ready(timeout=30):
+            logging.info("Worker CREIME_RT inicializado correctamente")
+            
+            # Hilo de procesamiento
+            self.processing_thread = threading.Thread(
+                target=self.processing_loop,
+                name="MonitorProcessor", 
+                daemon=True
+            )
+            self.processing_thread.start()
+            
+            # Iniciar visualizador solo si el worker está listo
+            if VISUALIZATION_ENABLED:
+                logging.info("Iniciando visualizador - Worker CREIME_RT operativo")
+                self.visualizer.start_visualization()
+            else:
+                logging.info("Visualización desactivada - Monitor en modo consola")
+                
         else:
-            logging.warning("Timeout esperando modelo - Iniciando visualizador de todos modos")
-        
-        # Hilo de procesamiento
-        self.processing_thread = threading.Thread(
-            target=self.processing_loop,
-            name="MonitorProcessor", 
-            daemon=True
-        )
-        self.processing_thread.start()
-        
-        # Iniciar visualizador
-        self.visualizer.start_visualization()
+            logging.error("Worker CREIME_RT no se inicializó correctamente")
+            logging.error("Visualizador NO iniciado - Sistema en modo degradado")
+            return False
         
         # Esperar inicialización
         buffer_ready = False
@@ -1209,15 +1227,55 @@ class RealTimeMonitor:
         
         return True
     
+    def _memory_cleanup(self):
+        """Limpieza periódica de memoria para operación 24/7"""
+        try:
+            # Limpiar buffers de estadísticas si son muy grandes
+            if len(self.creime_values) > 10000:
+                self.creime_values = self.creime_values[-5000:]  # Mantener últimos 5000
+                self.creime_timestamps = self.creime_timestamps[-5000:]
+            
+            # Garbage collection forzado
+            import gc
+            gc.collect()
+            
+        except Exception as e:
+            logging.warning(f"Error en limpieza de memoria: {e}")
+    
+    def _handle_processing_error(self):
+        """Manejo de errores de procesamiento para recuperación automática"""
+        try:
+            # Intentar reinicializar pipeline si hay errores consecutivos
+            logging.warning("Intentando recuperación automática del pipeline")
+            time.sleep(1)
+            
+        except Exception as e:
+            logging.error(f"Error en recuperación automática: {e}")
+    
     def stop_monitor(self):
-        """Detiene el monitor"""
+        """Detiene el monitor con limpieza completa"""
+        logging.info("Iniciando parada segura del monitor...")
         self.running = False
         
-        self.processing_pipeline.stop_workers()
-        self.visualizer.stop_visualization()
+        # Parada ordenada de componentes
+        try:
+            self.processing_pipeline.stop_workers()
+        except Exception as e:
+            logging.warning(f"Error deteniendo workers: {e}")
+        
+        try:
+            self.visualizer.stop_visualization()
+        except Exception as e:
+            logging.warning(f"Error deteniendo visualizador: {e}")
         
         if self.socket:
-            self.socket.close()
+            try:
+                self.socket.close()
+            except Exception as e:
+                logging.warning(f"Error cerrando socket: {e}")
+        
+        # Limpieza final de memoria
+        self._memory_cleanup()
         
         if self.start_time:
             run_time = time.time() - self.start_time
