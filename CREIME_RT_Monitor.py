@@ -20,7 +20,7 @@ import json
 import sys
 import uuid
 from obspy import Stream, Trace, UTCDateTime
-from obspy.core.stats import Stats
+from obspy.core import Stats
 
 # ===== CONFIGURACIÓN GPU SEGURA PARA JETSON ORIN NANO =====
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
@@ -163,6 +163,10 @@ class RealTimeVisualizer:
             self.setup_processing_markers()
             
             plt.tight_layout(rect=[0, 0, 1, 0.96])
+            
+            # Configurar evento de cierre de ventana
+            self.fig.canvas.mpl_connect('close_event', self.on_window_close)
+            
             logging.info("Visualizador del monitor configurado correctamente")
             
         except Exception as e:
@@ -196,34 +200,29 @@ class RealTimeVisualizer:
             logging.error(f"Error configurando marcadores de procesamiento: {e}")
     
     def calculate_dynamic_ylimits(self, data, component_name):
-        """Algoritmo mejorado para escalado dinámico con mejor resolución"""
+        """Escalado dinámico simple basado en amplitud real de la señal"""
         if len(data) == 0:
-            return -1, 1
+            return -0.1, 0.1
         
-        # Usar percentiles para mejor escalado
-        p95 = np.percentile(np.abs(data), 95)
-        p99 = np.percentile(np.abs(data), 99)
+        # Obtener valores máximo y mínimo reales
+        data_max = np.max(data)
+        data_min = np.min(data)
         
-        self.max_values_history[component_name].append(p95)
+        # Calcular rango con margen del 10%
+        data_range = data_max - data_min
+        margin = data_range * 0.1 if data_range > 0 else 0.01
         
-        if len(self.max_values_history[component_name]) > 0:
-            # Usar percentil 75 del historial para estabilidad
-            historical_max = np.percentile(list(self.max_values_history[component_name]), 75)
-            target_max = max(p99, historical_max)
-        else:
-            target_max = p99
+        # Límites dinámicos basados en amplitud real
+        y_max = data_max + margin
+        y_min = data_min - margin
         
-        # Margen más ajustado para mejor resolución
-        margin = 1.1
-        limit = target_max * margin
+        # Límite mínimo para evitar escalas muy pequeñas
+        if abs(y_max - y_min) < 0.02:
+            center = (y_max + y_min) / 2
+            y_max = center + 0.01
+            y_min = center - 0.01
         
-        # Límite mínimo más pequeño para señales débiles
-        min_limit = max(0.01, target_max * 0.1)
-        
-        if limit < min_limit:
-            limit = min_limit
-        
-        return -limit, limit
+        return y_min, y_max
     
     def update_data(self, component, data, timestamp):
         """Actualización de datos para visualización en tiempo real"""
@@ -348,6 +347,11 @@ class RealTimeVisualizer:
         except Exception as e:
             logging.error(f"Error iniciando visualización: {e}")
             self.visualization_enabled = False
+    
+    def on_window_close(self, event):
+        """Maneja el cierre de la ventana del visualizador"""
+        logging.info("Ventana cerrada - Deteniendo sistema")
+        self.detector.stop_monitor()
     
     def stop_visualization(self):
         """Detiene el sistema de visualización"""
@@ -1314,18 +1318,19 @@ def main():
     
     try:
         logging.info(f"Iniciando monitor CREIME_RT en tiempo real")
+        logging.info("Presiona Ctrl+C para detener el sistema")
         
         if monitor.start_monitor():
             if VISUALIZATION_ENABLED:
-                plt.show()
+                plt.show(block=True)
             else:
                 while monitor.running:
-                    time.sleep(5)
+                    time.sleep(1)
         else:
             logging.error("Fallo en inicio del monitor")
             
     except KeyboardInterrupt:
-        logging.info("Monitor detenido por usuario")
+        logging.info("\nMonitor detenido por usuario (Ctrl+C)")
     except Exception as e:
         logging.error(f"Error crítico en monitor: {e}")
     finally:
