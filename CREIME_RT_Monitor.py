@@ -533,6 +533,7 @@ class UltraFastProcessingPipeline:
         """Inicia workers de procesamiento"""
         self.running = True
         self.workers_ready = threading.Event()  # Evento para sincronizar inicialización
+        self.worker_initialized = False
         
         for i in range(self.num_workers):
             worker = threading.Thread(
@@ -553,10 +554,13 @@ class UltraFastProcessingPipeline:
             logging.info("Worker monitor CREIME_RT inicializado")
             
             # Señalar que el worker está listo
+            self.worker_initialized = True
             self.workers_ready.set()
             
         except Exception as e:
             logging.error(f"Worker monitor no pudo cargar modelo: {e}")
+            self.worker_initialized = False
+            self.workers_ready.set()  # Señalar fallo también
             return
         
         while self.running:
@@ -631,7 +635,9 @@ class UltraFastProcessingPipeline:
     
     def is_worker_ready(self, timeout=30):
         """Verifica si el worker CREIME_RT está listo"""
-        return hasattr(self, 'workers_ready') and self.workers_ready.wait(timeout)
+        if hasattr(self, 'workers_ready') and self.workers_ready.wait(timeout):
+            return getattr(self, 'worker_initialized', False)
+        return False
     
     def stop_workers(self):
         """Detiene workers"""
@@ -1204,8 +1210,10 @@ class RealTimeMonitor:
         # Esperar a que el worker CREIME_RT esté completamente inicializado
         logging.info("Esperando inicialización completa del worker CREIME_RT...")
         
-        if self.processing_pipeline.is_worker_ready(timeout=30):
-            logging.info("Worker CREIME_RT inicializado correctamente")
+        worker_ready = self.processing_pipeline.is_worker_ready(timeout=60)  # Más tiempo
+        
+        if worker_ready:
+            logging.info("✅ Worker CREIME_RT inicializado correctamente")
             
             # Hilo de procesamiento
             self.processing_thread = threading.Thread(
@@ -1223,8 +1231,9 @@ class RealTimeMonitor:
                 logging.info("Visualización desactivada - Monitor en modo consola")
                 
         else:
-            logging.error("Worker CREIME_RT no se inicializó correctamente")
+            logging.error("❌ Worker CREIME_RT no se inicializó correctamente")
             logging.error("Visualizador NO iniciado - Sistema en modo degradado")
+            self.stop_monitor()
             return False
         
         # Esperar inicialización
