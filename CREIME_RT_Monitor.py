@@ -167,7 +167,7 @@ class RealTimeVisualizer:
             # Configurar evento de cierre de ventana
             self.fig.canvas.mpl_connect('close_event', self.on_window_close)
             
-            logging.info("Visualizador del monitor configurado correctamente")
+
             
         except Exception as e:
             logging.error(f"Error configurando visualización: {e}")
@@ -343,7 +343,7 @@ class RealTimeVisualizer:
             self.animation = animation.FuncAnimation(
                 self.fig, self.update_plot, interval=200, blit=False, cache_frame_data=False
             )
-            logging.info("Visualizador del monitor iniciado")
+
         except Exception as e:
             logging.error(f"Error iniciando visualización: {e}")
             self.visualization_enabled = False
@@ -544,14 +544,14 @@ class UltraFastProcessingPipeline:
             worker.start()
             self.workers.append(worker)
         
-        logging.info(f"Iniciados {self.num_workers} workers del monitor")
+
     
     def processing_worker(self):
         """Worker para CREIME_RT en monitor"""
         try:
             from saipy.models.creime import CREIME_RT
             model = CREIME_RT(self.model_path)
-            logging.info("Worker monitor CREIME_RT inicializado")
+
             
             # Señalar que el worker está listo
             self.worker_initialized = True
@@ -724,12 +724,7 @@ class RealTimeMonitor:
         self.data_thread = None
         self.processing_thread = None
         
-        logging.info("=== MONITOR CREIME_RT CONFIGURADO ===")
-        logging.info(f"HOST: {host}:{port}")
-        logging.info(f"VENTANA: {self.window_size} muestras ({self.window_size/sampling_rate} segundos)")
-        logging.info(f"UMBRAL DETECCIÓN: {self.detection_threshold}")
-        logging.info(f"UMBRAL RUIDO ALTO: {self.high_noise_threshold}")
-        logging.info(f"VENTANAS CONSECUTIVAS: {self.consecutive_windows}")
+        logging.info(f"Monitor CREIME_RT configurado - {host}:{port}")
     
     def enable_anyshake_realtime(self):
         """Activa modo tiempo real en AnyShake usando comando confirmado"""
@@ -737,7 +732,7 @@ class RealTimeMonitor:
         cmd = b"AT+REALTIME=1\r\n"
         
         try:
-            logging.info(f"Activando modo tiempo real: {cmd.decode('ascii').strip()}")
+    
             
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.settimeout(5.0)  # Más tiempo como en tu script
@@ -748,7 +743,7 @@ class RealTimeMonitor:
             time.sleep(1)
             
             s.close()
-            logging.info("Comando AT+REALTIME=1 enviado - Esperando confirmación por tasa de paquetes")
+
             return True
             
         except Exception as e:
@@ -765,15 +760,15 @@ class RealTimeMonitor:
         retry_delay = 5
         
         # Intentar activar modo tiempo real
-        logging.info("Intentando activar modo tiempo real AnyShake...")
+
         realtime_enabled = self.enable_anyshake_realtime()
         
         # El modo se detectará automáticamente por tasa de paquetes
         self.anyshake_packet_interval = 1.0  # Inicial - se ajustará dinámicamente
         if realtime_enabled:
-            logging.info("AT+REALTIME=1 enviado - Detectando modo por tasa de paquetes...")
+
         else:
-            logging.info("Iniciando en modo normal - Detectará automáticamente si se activa tiempo real")
+
         
         # Actualizar latencia objetivo y buffer
         self.latency_target = self.anyshake_packet_interval
@@ -1286,7 +1281,7 @@ class RealTimeMonitor:
     def start_monitor(self):
         """Inicia el monitor completo"""
         # Obtener información del dispositivo
-        logging.info("Obteniendo información del dispositivo AnyShake...")
+
         device_info = self.check_anyshake_info()
         
         if not self.connect_to_anyshake():
@@ -1295,11 +1290,7 @@ class RealTimeMonitor:
         self.start_time = time.time()
         self.monitor_start_time = datetime.now()
         
-        logging.info("INICIANDO MONITOR CREIME_RT")
-        logging.info(f" Host: {self.host}:{self.port}")
-        logging.info(f" Umbral Detección: {self.detection_threshold}")
-        logging.info(f" Ventanas Consecutivas: {self.consecutive_windows}")
-        logging.info(f" Tiempo inicio: {self.monitor_start_time}")
+        logging.info(f"Monitor iniciado - {self.host}:{self.port} - Umbral: {self.detection_threshold}")
         
         self.running = True
         
@@ -1312,12 +1303,12 @@ class RealTimeMonitor:
         self.data_thread.start()
         
         # Esperar a que el worker CREIME_RT esté completamente inicializado
-        logging.info("Esperando inicialización completa del worker CREIME_RT...")
+
         
         worker_ready = self.processing_pipeline.is_worker_ready(timeout=60)  # Más tiempo
         
         if worker_ready:
-            logging.info("Worker CREIME_RT inicializado correctamente")
+            logging.info("CREIME_RT listo")
             
             # Hilo de procesamiento
             self.processing_thread = threading.Thread(
@@ -1329,10 +1320,10 @@ class RealTimeMonitor:
             
             # Iniciar visualizador solo si el worker está listo
             if VISUALIZATION_ENABLED:
-                logging.info("Iniciando visualizador - Worker CREIME_RT operativo")
+
                 self.visualizer.start_visualization()
             else:
-                logging.info("Visualización desactivada - Monitor en modo consola")
+
                 
         else:
             logging.error("Worker CREIME_RT no se inicializó correctamente")
@@ -1350,13 +1341,9 @@ class RealTimeMonitor:
             buffer_ready = current_samples >= 50
             
             if not buffer_ready and (time.time() - startup_time > 1):
-                elapsed = time.time() - startup_time
-                logging.info(f"Inicializando buffer monitor: {current_samples}/3000 muestras ({elapsed:.1f}s)")
+
         
-        if buffer_ready:
-            logging.info("MONITOR OPERATIVO - Procesando datos en tiempo real")
-        else:
-            logging.warning("Monitor operativo con buffer parcial")
+        logging.info("Monitor operativo")
         
         return True
     
