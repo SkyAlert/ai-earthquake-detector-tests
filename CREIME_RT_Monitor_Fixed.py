@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# CAMBIO 002
+# CAMBIO 003
 """
 CREIME_RT MONITOR - Sistema de Alerta Sísmica en Tiempo Real
 Monitor que usa la lógica del simulador pero con datos en tiempo real de AnyShake
@@ -415,7 +415,7 @@ class UltraFastBuffer:
         with self.lock:
             current_time = time.time()
             
-            # Procesar cada 100ms para latencia mínima
+            # FORZAR procesamiento cada 100ms
             if current_time - self.last_window_time < 0.1:
                 return None
                 
@@ -748,6 +748,11 @@ class RealTimeMonitor:
         self.latency_target = 0.1
         self.buffer.update_interval = 0.1
         logging.info("FORZANDO modo tiempo real (100ms) - Esperando 10 pkt/s")
+        
+        # FORZAR cambio directo en el buffer
+        with self.buffer.lock:
+            self.buffer.update_interval = 0.1
+        logging.info("Buffer forzado a 100ms - Procesamiento cada 0.1s")
         
         time.sleep(2)  # Esperar activación
         logging.info("Sistema configurado en modo ULTRA RÁPIDO - Buffer 100ms")
