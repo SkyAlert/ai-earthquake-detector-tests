@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# CAMBIO 001
+# CAMBIO 002
 """
 CREIME_RT MONITOR - Sistema de Alerta Sísmica en Tiempo Real
 Monitor que usa la lógica del simulador pero con datos en tiempo real de AnyShake
