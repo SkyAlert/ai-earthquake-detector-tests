@@ -732,47 +732,31 @@ class RealTimeMonitor:
         logging.info(f"VENTANAS CONSECUTIVAS: {self.consecutive_windows}")
     
     def enable_anyshake_realtime(self):
-        """Activa modo tiempo real en AnyShake probando múltiples comandos"""
-        commands = [
-            b"AT+REALTIME=1\r\n",
-            b"AT+REALTIME=ON\r\n", 
-            b"AT+RT=1\r\n",
-            b"AT+FAST=1\r\n",
-            b"AT+SPEED=FAST\r\n",
-            b"AT+MODE=REALTIME\r\n"
-        ]
+        """Activa modo tiempo real en AnyShake usando comando confirmado"""
+        # Comando confirmado que funciona
+        cmd = b"AT+REALTIME=1\r\n"
         
-        for i, cmd in enumerate(commands):
-            try:
-                logging.info(f"Probando comando {i+1}/{len(commands)}: {cmd.decode('ascii').strip()}")
-                
-                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.settimeout(3.0)
-                s.connect((self.host, self.port))
-                s.sendall(cmd)
-                
-                # Leer respuesta
-                try:
-                    response = s.recv(1024).decode('ascii', errors='ignore').strip()
-                    logging.info(f"Respuesta: '{response}'")
-                    
-                    if any(word in response.upper() for word in ['OK', 'SUCCESS', 'ENABLED', 'ON']):
-                        s.close()
-                        logging.info(f"✅ Modo tiempo real activado con: {cmd.decode('ascii').strip()}")
-                        return True
-                        
-                except socket.timeout:
-                    logging.info("Sin respuesta del comando")
-                    
-                s.close()
-                time.sleep(0.5)  # Pausa entre comandos
-                
-            except Exception as e:
-                logging.debug(f"Comando {cmd.decode('ascii').strip()} falló: {e}")
-                continue
+        try:
+            logging.info(f"Activando modo tiempo real: {cmd.decode('ascii').strip()}")
+            
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(5.0)  # Más tiempo como en tu script
+            s.connect((self.host, self.port))
+            s.sendall(cmd)
+            
+            # Esperar activación como en tu script exitoso
+            time.sleep(1)
+            
+            s.close()
+            logging.info("Comando AT+REALTIME=1 enviado - Esperando confirmación por tasa de paquetes")
+            return True
+            
+        except Exception as e:
+            logging.warning(f"Error enviando comando: {e}")
+            return False
         
-        logging.warning("⚠️ No se pudo activar modo tiempo real con ningún comando")
-        logging.info("📝 Comandos probados: AT+REALTIME=1, AT+RT=1, AT+FAST=1, etc.")
+        logging.warning("No se pudo enviar comando AT+REALTIME=1")
+        logging.info("El sistema continuará y detectará automáticamente si el modo se activó")
         return False
     
     def connect_to_anyshake(self):
@@ -781,19 +765,19 @@ class RealTimeMonitor:
         retry_delay = 5
         
         # Intentar activar modo tiempo real
-        logging.info("🔍 Intentando activar modo tiempo real AnyShake...")
+        logging.info("Intentando activar modo tiempo real AnyShake...")
         realtime_enabled = self.enable_anyshake_realtime()
         
+        # El modo se detectará automáticamente por tasa de paquetes
+        self.anyshake_packet_interval = 1.0  # Inicial - se ajustará dinámicamente
         if realtime_enabled:
-            self.anyshake_packet_interval = 0.1  # 100ms confirmado
-            logging.info("🚀 Modo tiempo real confirmado - Esperando paquetes cada 100ms")
+            logging.info("AT+REALTIME=1 enviado - Detectando modo por tasa de paquetes...")
         else:
-            self.anyshake_packet_interval = 1.0  # 1000ms modo normal
-            logging.info("🐢 Continuando en modo normal - Paquetes cada 1000ms")
-            logging.info("💡 Sugerencia: Verifica la documentación de tu AnyShake para comandos de tiempo real")
+            logging.info("Iniciando en modo normal - Detectará automáticamente si se activa tiempo real")
         
-        # Actualizar latencia objetivo
+        # Actualizar latencia objetivo y buffer
         self.latency_target = self.anyshake_packet_interval
+        self.buffer.update_interval = self.anyshake_packet_interval
         
         time.sleep(1)  # Esperar activación
         
@@ -802,7 +786,7 @@ class RealTimeMonitor:
                 self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 self.socket.settimeout(10.0)
                 self.socket.connect((self.host, self.port))
-                logging.info(f"✅ Conexión establecida: {self.host}:{self.port}")
+                logging.info(f"Conexión establecida: {self.host}:{self.port}")
                 return True
                 
             except Exception as e:
@@ -851,11 +835,12 @@ class RealTimeMonitor:
             return None
     
     def ultra_fast_processing(self):
-        """Procesamiento sincronizado con AnyShake"""
+        """Procesamiento ultra-rápido adaptativo según modo AnyShake"""
         current_time = time.time()
         
-        # Sincronización perfecta: procesar cada vez que llega paquete AnyShake
-        if current_time - self.last_processing_time < self.anyshake_packet_interval:
+        # Procesamiento adaptativo: más frecuente en modo tiempo real
+        min_interval = self.anyshake_packet_interval * 0.5  # 50ms en tiempo real, 500ms en normal
+        if current_time - self.last_processing_time < min_interval:
             return None
         
         window_data = self.buffer.get_latest_window()
@@ -973,7 +958,7 @@ class RealTimeMonitor:
             
             mag_display = f"{corrected_magnitude:.1f}" if corrected_magnitude is not None else "Sin magnitud (ruido)"
             alert_message = (
-                f"🚨 MONITOR: SISMO CONFIRMADO 🚨\n"
+                f"MONITOR: SISMO CONFIRMADO\n"
                 f"Raw CREIME_RT: {detection_result['confidence']:.2f}\n"
                 f"Magnitud Corregida: {mag_display}\n"
                 f"Ventanas consecutivas: {detection_info['consecutive_detections']}/{self.consecutive_windows}\n"
@@ -996,7 +981,7 @@ class RealTimeMonitor:
         else:
             mag_display = f"{detection_result['magnitude']:.1f}" if detection_result['magnitude'] is not None else "N/A"
             alert_message = (
-                f"⚠️ MONITOR: EVENTO DETECTADO ⚠️\n"
+                f"MONITOR: EVENTO DETECTADO\n"
                 f"Salida CREIME_RT: {detection_result['confidence']:.2f}\n"
                 f"Magnitud: {mag_display}\n"
                 f"Ventanas consecutivas: {detection_info['consecutive_detections']}/{self.consecutive_windows}\n"
@@ -1170,20 +1155,31 @@ class RealTimeMonitor:
                                 
                                 self.packet_count += 1
                                 
-                                # Monitorear frecuencia de paquetes para verificar modo tiempo real
+                                # Monitorear y ajustar dinámicamente el modo de AnyShake
                                 if self.packet_count % 15 == 0:  # Cada 15 paquetes
                                     elapsed = current_time - self.start_time
                                     packet_rate = self.packet_count / elapsed if elapsed > 0 else 0
                                     expected_rate = 3.0 / self.anyshake_packet_interval  # 3 componentes
                                     
-                                    if packet_rate > expected_rate * 0.8:  # 80% de la tasa esperada
-                                        mode_status = "🚀 TIEMPO REAL" if self.anyshake_packet_interval < 0.5 else "🐢 NORMAL"
+                                    # Detectar modo tiempo real automáticamente
+                                    if packet_rate > 25:  # >25 pkt/s indica modo tiempo real
+                                        if self.anyshake_packet_interval != 0.1:
+                                            self.anyshake_packet_interval = 0.1
+                                            self.latency_target = 0.1
+                                            logging.info("MODO TIEMPO REAL DETECTADO - Latencia objetivo: 0.4s")
+                                        mode_status = "TIEMPO REAL"
+                                    elif packet_rate > 2.5:  # >2.5 pkt/s indica modo normal
+                                        if self.anyshake_packet_interval != 1.0:
+                                            self.anyshake_packet_interval = 1.0
+                                            self.latency_target = 1.0
+                                            logging.info("MODO NORMAL DETECTADO - Latencia objetivo: 1.5s")
+                                        mode_status = "NORMAL"
                                     else:
-                                        mode_status = "⚠️ LENTO"
+                                        mode_status = "LENTO"
                                     
                                     if self.packet_count == 15:  # Solo mostrar al inicio
-                                        logging.info(f"📈 Tasa de paquetes: {packet_rate:.1f} pkt/s - Modo: {mode_status}")
-                                        logging.info(f"🎯 Esperado: {expected_rate:.1f} pkt/s - Intervalo: {self.anyshake_packet_interval*1000:.0f}ms")
+                                        logging.info(f"Tasa: {packet_rate:.1f} pkt/s - Modo: {mode_status} - Latencia: {self.latency_target*1000:.0f}ms")
+                                        logging.info(f"Esperado: {expected_rate:.1f} pkt/s - Intervalo: {self.anyshake_packet_interval*1000:.0f}ms")
                                 
                     except Exception as e:
                         continue
@@ -1279,7 +1275,7 @@ class RealTimeMonitor:
                 s.close()
                 
                 if response and len(response) > 2:
-                    logging.info(f"📱 AnyShake Info ({cmd.decode().strip()}): {response}")
+                    logging.info(f"AnyShake Info ({cmd.decode().strip()}): {response}")
                     return response
                     
             except Exception:
@@ -1290,7 +1286,7 @@ class RealTimeMonitor:
     def start_monitor(self):
         """Inicia el monitor completo"""
         # Obtener información del dispositivo
-        logging.info("🔍 Obteniendo información del dispositivo AnyShake...")
+        logging.info("Obteniendo información del dispositivo AnyShake...")
         device_info = self.check_anyshake_info()
         
         if not self.connect_to_anyshake():
@@ -1321,7 +1317,7 @@ class RealTimeMonitor:
         worker_ready = self.processing_pipeline.is_worker_ready(timeout=60)  # Más tiempo
         
         if worker_ready:
-            logging.info("✅ Worker CREIME_RT inicializado correctamente")
+            logging.info("Worker CREIME_RT inicializado correctamente")
             
             # Hilo de procesamiento
             self.processing_thread = threading.Thread(
@@ -1339,7 +1335,7 @@ class RealTimeMonitor:
                 logging.info("Visualización desactivada - Monitor en modo consola")
                 
         else:
-            logging.error("❌ Worker CREIME_RT no se inicializó correctamente")
+            logging.error("Worker CREIME_RT no se inicializó correctamente")
             logging.error("Visualizador NO iniciado - Sistema en modo degradado")
             self.stop_monitor()
             return False
