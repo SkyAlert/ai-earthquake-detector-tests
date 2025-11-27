@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# CAMBIO 003
+# CAMBIO 004
 """
 CREIME_RT MONITOR - Sistema de Alerta Sísmica en Tiempo Real
 Monitor que usa la lógica del simulador pero con datos en tiempo real de AnyShake
@@ -724,15 +724,14 @@ class RealTimeMonitor:
         logging.info(f"Monitor CREIME_RT configurado - {host}:{port}")
     
     def enable_anyshake_realtime(self):
-        """Activa modo tiempo real en AnyShake"""
+        """Activa modo tiempo real en AnyShake y mantiene conexión"""
         try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.settimeout(5.0)
-            s.connect((self.host, self.port))
-            s.sendall(b"AT+REALTIME=1\r\n")
+            self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.socket.settimeout(5.0)
+            self.socket.connect((self.host, self.port))
+            self.socket.sendall(b"AT+REALTIME=1\r\n")
             time.sleep(1)
-            s.close()
-            logging.info("Comando AT+REALTIME=1 enviado")
+            logging.info("Comando AT+REALTIME=1 enviado - Conexión mantenida")
             return True
         except Exception as e:
             logging.warning(f"Error activando tiempo real: {e}")
@@ -757,15 +756,17 @@ class RealTimeMonitor:
         time.sleep(2)  # Esperar activación
         logging.info("Sistema configurado en modo ULTRA RÁPIDO - Buffer 100ms")
         
-        try:
-            self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.socket.settimeout(10.0)
-            self.socket.connect((self.host, self.port))
-            logging.info(f"Conexión establecida: {self.host}:{self.port}")
-            return True
-        except Exception as e:
-            logging.error(f"Error conectando: {e}")
-            return False
+        if self.socket is None:
+            try:
+                self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self.socket.settimeout(10.0)
+                self.socket.connect((self.host, self.port))
+            except Exception as e:
+                logging.error(f"Error conectando: {e}")
+                return False
+        
+        logging.info(f"Conexión establecida: {self.host}:{self.port}")
+        return True
     
     def parse_observer_packet(self, packet):
         """Parser optimizado para paquetes AnyShake"""
