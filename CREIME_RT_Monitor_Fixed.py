@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# CAMBIO 006
+# CAMBIO 008
 """
 CREIME_RT MONITOR - Sistema de Alerta Sísmica en Tiempo Real
 Monitor que usa la lógica del simulador pero con datos en tiempo real de AnyShake
@@ -482,24 +482,25 @@ class OptimizedHybridFilter:
         self.zi_hp = np.zeros(max(len(self.a_hp), len(self.b_hp)) - 1)
         self.zi_lp = np.zeros(max(len(self.a_lp), len(self.b_lp)) - 1)
         
-        self.zscore_buffer = deque(maxlen=fs*5)  # Buffer más grande para Z-Score estable
+        self.zscore_buffer = deque(maxlen=fs)  # Buffer para Z-Score
     
     def apply_filter(self, data):
         """Pipeline: Z-Score → Filtro 1-45Hz → Conversión Gals"""
         if not data:
             return data
         
-        # 1. Centrado simple y estable para modo tiempo real
+        # 1. Normalización Z-Score (reemplaza detrending)
         self.zscore_buffer.extend(data)
-        if len(self.zscore_buffer) > 100:  # Buffer estable
+        if len(self.zscore_buffer) > 1:
             buffer_data = list(self.zscore_buffer)
             mean_val = np.mean(buffer_data)
-            # Solo centrar, sin normalización Z-Score agresiva
-            zscore_data = [x - mean_val for x in data]
+            std_val = np.std(buffer_data)
+            if std_val > 0:
+                zscore_data = [(x - mean_val) / std_val for x in data]
+            else:
+                zscore_data = [0.0] * len(data)
         else:
-            # Centrado local hasta tener buffer
-            mean_val = np.mean(data) if data else 0
-            zscore_data = [x - mean_val for x in data]
+            zscore_data = [0.0] * len(data)
             
         zscore_np = np.array(zscore_data, dtype=np.float32)
         
@@ -1066,7 +1067,7 @@ class RealTimeMonitor:
         
         while self.running:
             try:
-                data = self.socket.recv(8192)  # Buffer más grande para evitar gaps
+                data = self.socket.recv(4096)
                 if not data:
                     logging.warning("Conexión cerrada - Reconectando...")
                     if not self.connect_to_anyshake():
@@ -1077,8 +1078,11 @@ class RealTimeMonitor:
                 
                 self.data_buffer += data
                 
-                while b'\r' in self.data_buffer:
-                    packet, self.data_buffer = self.data_buffer.split(b'\r', 1)
+                while b'\n' in self.data_buffer or b'\r' in self.data_buffer:
+                    if b'\n' in self.data_buffer:
+                        packet, self.data_buffer = self.data_buffer.split(b'\n', 1)
+                    else:
+                        packet, self.data_buffer = self.data_buffer.split(b'\r', 1)
                     
                     try:
                         packet_str = packet.decode('ascii', errors='ignore').strip()
